@@ -21,7 +21,7 @@ from groq import Groq
 import os
 
 # Initialize Groq client
-os.environ['GROQ_API_KEY'] = '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'  # Replace 'xx' with your actual API key
+os.environ['GROQ_API_KEY'] = 'xxx'  # Replace 'xx' with your actual API key
 client = Groq()
 
 def transcribe(filename, client_id):
