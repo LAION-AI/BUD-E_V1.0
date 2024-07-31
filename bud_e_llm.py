@@ -2,7 +2,7 @@ import requests
 import json
 
 
-TOGETHER_API_KEY = "bc8ec9e53b89739f63f5e35cc60cfa152f25b24455dbb77e8cb7cf4860bbdfa6"
+TOGETHER_API_KEY = "xxxxx"
 
 def ask_LLM(modelname, systemprompt, content, TOGETHER_API_KEY=TOGETHER_API_KEY, temperature=0.7, top_p=0.9, max_tokens=400, frequency_penalty=1.05, presence_penalty=1.05):
     # Construct the payload
