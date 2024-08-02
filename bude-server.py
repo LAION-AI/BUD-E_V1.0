@@ -28,38 +28,47 @@ from bud_e_llm import ask_LLM
 
 app = FastAPI()
 
-client_data = {}
+client_sessions = {}
 is_running = True
 
 def generate_client_id():
     return hashlib.sha256(os.urandom(10)).hexdigest()[:10]
 
-def get_client_data(client_id):
-    return client_data.get(client_id, {})
-
-def update_client_data(client_id, field, value):
-    if client_id not in client_data:
-        client_data[client_id] = {}
-    client_data[client_id][field] = value
-
 def split_text_into_sentences(text):
     sentences = sent_tokenize(text)
     merged_sentences = []
-    i = 0
-    while i < len(sentences):
-        current_sentence = sentences[i]
-        if len(current_sentence) < 40:
-            if i + 1 < len(sentences):
-                current_sentence += ' ' + sentences[i + 1]
-                i += 1
-            elif merged_sentences:
-                merged_sentences[-1] += ' ' + current_sentence
-                i += 1
-                continue
-        merged_sentences.append(current_sentence)
-        i += 1
+    current_sentence = ""
+    
+    for i, sentence in enumerate(sentences):
+        if not merged_sentences:
+            # For the first merged sentence
+            current_sentence += sentence + " "
+            if len(current_sentence) >= 40 or i == len(sentences) - 1:
+                merged_sentences.append(current_sentence.strip())
+                current_sentence = ""
+        else:
+            # For subsequent sentences
+            if len(current_sentence) + len(sentence) <= 300:
+                current_sentence += sentence + " "
+            else:
+                if len(current_sentence) >= 200:
+                    merged_sentences.append(current_sentence.strip())
+                    current_sentence = sentence + " "
+                else:
+                    current_sentence += sentence + " "
+            
+            # Check if it's the last sentence
+            if i == len(sentences) - 1:
+                if len(current_sentence) >= 200:
+                    merged_sentences.append(current_sentence.strip())
+                elif merged_sentences:
+                    merged_sentences[-1] += " " + current_sentence.strip()
+    
+    # If there's only one short sentence in the entire text
+    if not merged_sentences and current_sentence:
+        merged_sentences.append(current_sentence.strip())
+    
     return merged_sentences
-
 @app.get("/")
 async def root():
     return {"message": "Server is running"}
@@ -67,9 +76,9 @@ async def root():
 @app.post("/generate_client_id")
 async def generate_client_id_endpoint():
     new_client_id = generate_client_id()
-    client_data[new_client_id] = {
+    client_sessions[new_client_id] = {
         'LLM-Config': {
-            'model': 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
+            'model': 'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',
             'temperature': 0.7,
             'top_p': 0.95,
             'max_tokens': 400,
@@ -83,35 +92,36 @@ async def generate_client_id_endpoint():
         'System Prompt': 'Initial Prompt'
     }
     return JSONResponse(content={"client_id": new_client_id}, status_code=200)
-
 @app.post("/receive_audio")
 async def receive_audio(client_id: str = Query(...), file: UploadFile = File(...)):
-    if client_id not in client_data:
+    if client_id not in client_sessions:
         raise HTTPException(status_code=403, detail="Invalid client ID")
 
     filename = f"{client_id}_audio.wav"
     with open(filename, "wb") as audio_file:
         audio_file.write(await file.read())
 
-    start_time = time.time()
-    user_input = transcribe(filename, client_id)
-    end_time = time.time()
-    print(f"ASR Time: {end_time - start_time} seconds")
-    print(f"User: {user_input}")
+    try:
+        start_time = time.time()
+        user_input = transcribe(filename, client_id)
+        end_time = time.time()
+        print(f"ASR Time: {end_time - start_time} seconds")
+        print(f"User: {user_input}")
+    finally:
+        os.remove(filename)  # Delete the audio file after transcription
 
-    client_specific_data = get_client_data(client_id)
-    conversation_history = client_specific_data.get('Conversation History', [])
-    system_prompt = client_specific_data.get('System Prompt', '')
-    llm_config = client_specific_data.get('LLM-Config', {})
+    client_session = client_sessions[client_id]
+    conversation_history = client_session.get('Conversation History', [])
+    system_prompt = client_session.get('System Prompt', '')
+    llm_config = client_session.get('LLM-Config', {})
 
     conversation_history.append({"role": "user", "content": user_input})
-    update_client_data(client_id, 'Conversation History', conversation_history)
 
     start_time = time.time()
     ai_response = ask_LLM(
         llm_config['model'],
         system_prompt,
-        str(conversation_history),
+        str(conversation_history)+" - Write BUD-E's reply to the user without chat formarting in brackets and no role, just directly the reply:",
         temperature=llm_config['temperature'],
         top_p=llm_config['top_p'],
         max_tokens=llm_config['max_tokens'],
@@ -123,7 +133,9 @@ async def receive_audio(client_id: str = Query(...), file: UploadFile = File(...
     print(f"AI: {ai_response}")
 
     conversation_history.append({"role": "assistant", "content": ai_response})
-    update_client_data(client_id, 'Conversation History', conversation_history)
+
+    # Update the conversation history in the client session
+    client_sessions[client_id]['Conversation History'] = conversation_history
 
     sentences = split_text_into_sentences(ai_response)
     
@@ -131,10 +143,15 @@ async def receive_audio(client_id: str = Query(...), file: UploadFile = File(...
     if sentences:
         first_sentence_audio = await generate_tts(sentences[0])
     
-    return JSONResponse(content={
+    response_data = {
         "first_sentence_audio": first_sentence_audio,
-        "sentences": sentences
-    }, status_code=200)
+        "sentences": sentences,
+        "updated_conversation_history": conversation_history,
+        "config_updates": client_session  # Send the full session data as config updates
+    }
+
+    return JSONResponse(content=response_data, status_code=200)
+
 
 async def generate_tts(sentence: str):
     tts_output = text_to_speech(sentence)
@@ -157,9 +174,23 @@ async def generate_tts_endpoint(request: SentenceRequest):
         raise HTTPException(status_code=500, detail="TTS generation failed")
     return {"filename": tts_filename}
 
+class DeleteFileRequest(BaseModel):
+    filename: str
+
+@app.post("/delete_tts_file")
+async def delete_tts_file(request: DeleteFileRequest):
+    try:
+        if os.path.exists(request.filename):
+            os.remove(request.filename)
+            return JSONResponse(content={"message": "File deleted successfully"}, status_code=200)
+        else:
+            return JSONResponse(content={"message": "File not found"}, status_code=404)
+    except Exception as e:
+        return JSONResponse(content={"message": f"Error deleting file: {str(e)}"}, status_code=500)
+
 @app.get('/take_screenshot')
 async def take_screenshot(client_id: str):
-    if client_id not in client_data:
+    if client_id not in client_sessions:
         raise HTTPException(status_code=403, detail="Invalid client ID")
 
     start_time = time.time()
@@ -173,7 +204,7 @@ async def take_screenshot(client_id: str):
 
 @app.post('/open_website')
 async def open_website(client_id: str, url: str):
-    if client_id not in client_data:
+    if client_id not in client_sessions:
         raise HTTPException(status_code=403, detail="Invalid client ID")
 
     start_time = time.time()
@@ -184,7 +215,7 @@ async def open_website(client_id: str, url: str):
 
 @app.get("/send_file")
 async def send_file(client_id: str, file: str):
-    if client_id not in client_data:
+    if client_id not in client_sessions:
         raise HTTPException(status_code=403, detail="Invalid client ID")
 
     if not os.path.exists(file):
@@ -203,24 +234,27 @@ async def send_file(client_id: str, file: str):
 
 @app.post("/update_client_config/{client_id}")
 async def update_client_config(client_id: str, config: dict):
-    if client_id not in client_data:
+    if client_id not in client_sessions:
         raise HTTPException(status_code=403, detail="Invalid client ID")
 
-    for key, value in config.items():
-        update_client_data(client_id, key, value)
+    client_sessions[client_id].update(config)
 
     return JSONResponse(content={"message": "Client configuration updated successfully"}, status_code=200)
 
 @app.get("/get_client_data/{client_id}")
 async def get_client_data_endpoint(client_id: str):
-    if client_id not in client_data:
+    if client_id not in client_sessions:
         raise HTTPException(status_code=404, detail="Client not found")
-    return JSONResponse(content=client_data[client_id], status_code=200)
+    return JSONResponse(content=client_sessions[client_id], status_code=200)
 
 def save_and_play_audio(client_id):
     """Function to save and play the latest audio file for a client."""
-    client_specific_data = get_client_data(client_id)
-    audio_files = client_specific_data.get('audio_files', [])
+    client_session = client_sessions.get(client_id)
+    if not client_session:
+        print("Invalid client ID")
+        return
+
+    audio_files = client_session.get('audio_files', [])
     if not audio_files:
         print("No audio data to save and play.")
         return
@@ -281,7 +315,7 @@ def run_cli():
             if os.path.exists(file_path):
                 with open(file_path, "rb") as file:
                     files = {"file": (os.path.basename(file_path), file)}
-                    response = requests.post(f"http://localhost:8001/send_file?client_id={client_id}", files=files)
+                    response = requests.get(f"http://localhost:8001/send_file?client_id={client_id}&file={file_path}")
                     if response.status_code == 200:
                         print(f"File sent successfully: {file_path}")
                     else:
