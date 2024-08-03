@@ -315,7 +315,7 @@ def run_cli():
             if os.path.exists(file_path):
                 with open(file_path, "rb") as file:
                     files = {"file": (os.path.basename(file_path), file)}
-                    response = requests.get(f"http://localhost:8001/send_file?client_id={client_id}&file={file_path}")
+                    response = requests.get(f"http://0.0.0.0:8006/send_file?client_id={client_id}&file={file_path}")
                     if response.status_code == 200:
                         print(f"File sent successfully: {file_path}")
                     else:
