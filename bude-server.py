@@ -1,3 +1,46 @@
+
+'''
+
+import subprocess
+import sys
+
+def install_dependencies():
+    dependencies = [
+        'asyncio',
+        'pyaudio',
+        'fastapi',
+        'uvicorn',
+        'pyautogui',
+        'requests',
+        'pandas',
+        'pydub',
+        'nltk',
+        'pydantic',
+        'websockets',  # For WebSocket support in FastAPI
+    ]
+
+    print("Installing dependencies...")
+
+    for dep in dependencies:
+        print(f"Installing {dep}...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", dep])
+            print(f"{dep} installed successfully.")
+        except subprocess.CalledProcessError:
+            print(f"Failed to install {dep}. Please install it manually.")
+
+    # Additional setup for NLTK
+    print("Downloading NLTK punkt tokenizer...")
+    import nltk
+    nltk.download('punkt')
+
+    print("\nAll dependencies have been installed.")
+    print("Note: Some packages like 'pyaudio' might require additional system-level dependencies.")
+    print("If you encounter any issues, please refer to the documentation of the respective packages.")
+
+if __name__ == "__main__":
+    install_dependencies()
+'''
 import asyncio
 import pyaudio
 import wave
@@ -7,7 +50,7 @@ import uvicorn
 import threading
 import io
 import webbrowser
-import pyautogui
+# import pyautogui
 import os
 import mimetypes
 import requests
@@ -25,6 +68,25 @@ nltk.download('punkt', quiet=True)
 from bud_e_transcribe import transcribe
 from bud_e_tts import text_to_speech
 from bud_e_llm import ask_LLM
+from pydantic import BaseModel
+from typing import List, Dict, Any
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+class SentenceRequest(BaseModel):
+    sentence: str
+
+class ClientConfig(BaseModel):
+    LLM_Config: Dict[str, Any]
+    TTS_Config: Dict[str, Any]
+    Skills: str
+    Conversation_History: List[Dict[str, str]]
+    Scratchpad: Dict[str, Any]
+    System_Prompt: str
+
 
 app = FastAPI()
 
@@ -74,24 +136,18 @@ async def root():
     return {"message": "Server is running"}
 
 @app.post("/generate_client_id")
-async def generate_client_id_endpoint():
+async def generate_client_id_endpoint(config: ClientConfig):
     new_client_id = generate_client_id()
     client_sessions[new_client_id] = {
-        'LLM-Config': {
-            'model': 'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',
-            'temperature': 0.7,
-            'top_p': 0.95,
-            'max_tokens': 400,
-            'frequency_penalty': 1.1,
-            'presence_penalty': 1.1
-        },
-        'TTS-Config': {'voice': 'en-us'},
-        'Skills': ['edit', 'completion'],
-        'Conversation History': [],
-        'Scratchpad': {},
-        'System Prompt': 'Initial Prompt'
+        'LLM-Config': config.LLM_Config,
+        'TTS-Config': config.TTS_Config,
+        'Skills': config.Skills,
+        'Conversation History': config.Conversation_History,
+        'Scratchpad': config.Scratchpad,
+        'System Prompt': config.System_Prompt
     }
     return JSONResponse(content={"client_id": new_client_id}, status_code=200)
+
 @app.post("/receive_audio")
 async def receive_audio(client_id: str = Query(...), file: UploadFile = File(...)):
     if client_id not in client_sessions:
@@ -153,6 +209,36 @@ async def receive_audio(client_id: str = Query(...), file: UploadFile = File(...
     return JSONResponse(content=response_data, status_code=200)
 
 
+
+@app.post("/generate_tts")
+async def generate_tts_endpoint(request: SentenceRequest):
+    logging.info(f"Received TTS request for sentence: {request.sentence}")
+    tts_filename = await generate_tts(request.sentence)
+    if tts_filename is None:
+        logging.error("TTS generation failed")
+        raise HTTPException(status_code=500, detail="TTS generation failed")
+    
+    logging.info(f"TTS file generated: {tts_filename}")
+    
+    try:
+        with open(tts_filename, 'rb') as f:
+            file_content = f.read()
+        
+        file_size = len(file_content)
+        logging.info(f"TTS file read successfully. Size: {file_size} bytes")
+        
+        return Response(content=file_content, media_type="audio/wav", 
+                        headers={"Content-Disposition": f"attachment; filename={os.path.basename(tts_filename)}",
+                                 "X-Filename": os.path.basename(tts_filename)})
+    except Exception as e:
+        logging.error(f"Error processing TTS file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing TTS file: {str(e)}")
+    finally:
+        if os.path.exists(tts_filename):
+            os.remove(tts_filename)
+            logging.info(f"TTS file removed from server: {tts_filename}")
+
+
 async def generate_tts(sentence: str):
     tts_output = text_to_speech(sentence)
     if tts_output is None:
@@ -164,15 +250,16 @@ async def generate_tts(sentence: str):
         tts_file.write(tts_output)
     return tts_filename
 
-class SentenceRequest(BaseModel):
-    sentence: str
 
 @app.post("/generate_tts")
 async def generate_tts_endpoint(request: SentenceRequest):
     tts_filename = await generate_tts(request.sentence)
     if tts_filename is None:
         raise HTTPException(status_code=500, detail="TTS generation failed")
-    return {"filename": tts_filename}
+    with open(tts_filename, 'rb') as f:
+        file_content = f.read()
+    return {"filename": tts_filename, "file_content": file_content}
+
 
 class DeleteFileRequest(BaseModel):
     filename: str
@@ -315,7 +402,7 @@ def run_cli():
             if os.path.exists(file_path):
                 with open(file_path, "rb") as file:
                     files = {"file": (os.path.basename(file_path), file)}
-                    response = requests.get(f"http://0.0.0.0:8006/send_file?client_id={client_id}&file={file_path}")
+                    response = requests.get(f"http://90.186.125.172:8002/send_file?client_id={client_id}&file={file_path}")
                     if response.status_code == 200:
                         print(f"File sent successfully: {file_path}")
                     else:
@@ -341,3 +428,4 @@ if __name__ == "__main__":
     run_cli()
 
     print("Shutting down...")
+
