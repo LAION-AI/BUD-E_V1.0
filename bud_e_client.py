@@ -23,6 +23,11 @@ import sounddevice as sd
 import soundfile as sf
 from queue import Queue
 import time
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 def read_systemprompt(file_path):
     try:
@@ -141,7 +146,7 @@ class BudEClient(tk.Tk):
     def get_default_config(self):
         return {
             'LLM-Config': {
-                'model': 'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',
+                'model': 'phi',
                 'temperature': 0.7,
                 'top_p': 0.95,
                 'max_tokens': 400,
@@ -149,10 +154,10 @@ class BudEClient(tk.Tk):
                 'presence_penalty': 1.1
             },
             'TTS-Config': {'voice': 'en-us'},
-            'Skills': "bla...",
+            'Skills': ['edit', 'completion'],
             'Conversation History': [],
             'Scratchpad': {},
-            'System Prompt': 'Initial Prompt'
+            'System Prompt': systemprompt
         }
 
     def load_conversation_history(self):
@@ -239,7 +244,7 @@ class BudEClient(tk.Tk):
 
         for attempt in range(max_retries):
             try:
-                response = requests.get("http://localhost:8001/")
+                response = requests.get("http://213.173.96.19:8001/")
                 if response.status_code == 200:
                     print("Connected to server successfully")
                     self.status_label.config(text="Status: Connected to server")
@@ -260,20 +265,28 @@ class BudEClient(tk.Tk):
         messagebox.showerror("Connection Error", "Failed to connect to the server. Please check if the server is running and try again.")
 
     def request_client_id(self):
-        response = requests.post("http://localhost:8001/generate_client_id")
+        config = {
+            "LLM_Config": self.config['LLM-Config'],
+            "TTS_Config": self.config['TTS-Config'],
+            "Skills": self.config['Skills'],
+            "Conversation_History": self.conversation_history,
+            "Scratchpad": self.config['Scratchpad'],
+            "System_Prompt": self.config['System Prompt']
+        }
+        response = requests.post("http://213.173.96.19:8001/generate_client_id", json=config)
         if response.status_code == 200:
             client_id = response.json()["client_id"]
             print(f"Client ID: {client_id}")
             return client_id
         else:
-            print("Failed to generate client ID")
+            print(f"Failed to generate client ID. Status code: {response.status_code}, Response: {response.text}")
             return None
 
     def update_client_config(self):
         try:
             config_text = self.config_textbox.get(1.0, tk.END)
             config_data = json.loads(config_text)
-            response = requests.post(f"http://localhost:8001/update_client_config/{self.client_id}", json=config_data)
+            response = requests.post(f"http://213.173.96.19:8001/update_client_config/{self.client_id}", json=config_data)
             if response.status_code == 200:
                 self.config = config_data
                 messagebox.showinfo("Success", "Client configuration updated successfully on the server")
@@ -356,28 +369,81 @@ class BudEClient(tk.Tk):
 
         with open(filename, 'rb') as audio_file:
             files = {"file": (filename, audio_file)}
-            response = requests.post(f"http://localhost:8001/receive_audio?client_id={self.client_id}", files=files, json=self.config)
+            response = requests.post(f"http://213.173.96.19:8001/receive_audio?client_id={self.client_id}", files=files, json=self.config)
 
         if response.status_code == 200:
             data = response.json()
-            first_sentence_audio = data['first_sentence_audio']
+            
             sentences = data['sentences']
             self.conversation_history = data['updated_conversation_history']
             self.apply_config_updates(data['config_updates'])
-            print(self.conversation_history)
             
             self.save_conversation_history()
             
-            self.play_audio(first_sentence_audio)
+            # Process the first sentence immediately
+            if sentences:
+                first_sentence = sentences[0]
+                self.process_sentence(first_sentence)
 
+            # Queue the remaining sentences
             for sentence in sentences[1:]:
                 self.sentence_queue.put(sentence)
 
             threading.Thread(target=self.process_sentences, daemon=True).start()
-
             self.measure_latency(start_time)
         else:
             print(f"Failed to send audio segment: {response.text}")
+
+    def process_sentences(self):
+        while not self.sentence_queue.empty():
+            sentence = self.sentence_queue.get()
+            self.process_sentence(sentence)
+
+    def process_sentence(self, sentence):
+        logging.info(f"Processing sentence: {sentence}")
+        response = requests.post("http://213.173.96.19:8001/generate_tts", 
+                                 json={"sentence": sentence})
+        if response.status_code == 200:
+            logging.info("Received TTS response successfully")
+            audio_data = response.content
+            sample_rate = int(response.headers.get("X-Sample-Rate", 24000)) ### STYLETTS2 returns 24khz
+            channels = int(response.headers.get("X-Channels", 1))
+            sample_width = int(response.headers.get("X-Sample-Width", 2))
+
+            # Create a BytesIO object from the audio data
+            audio_buffer = io.BytesIO(audio_data)
+
+            # Play the audio directly from the buffer
+            self.play_audio(audio_buffer, sample_rate, channels, sample_width)
+        else:
+            logging.error(f"Failed to generate TTS for sentence: {response.text}")
+
+    def play_audio(self, audio_buffer, sample_rate, channels, sample_width):
+        def play_sound():
+            with self.playback_lock:
+                try:
+                    logging.info("Attempting to play audio")
+                    
+                    # Read the audio data from the buffer
+                    audio_buffer.seek(0)
+                    with wave.open(audio_buffer, 'rb') as wf:
+                        data = wf.readframes(wf.getnframes())
+                    
+                    # Convert the audio data to a numpy array
+                    audio_data = np.frombuffer(data, dtype=np.int16)
+                    audio_data = audio_data.astype(np.float32) / 32768.0  # Normalize to [-1.0, 1.0]
+
+                    # Play the audio
+                    sd.play(audio_data, sample_rate)
+                    sd.wait()
+                    logging.info("Audio playback completed")
+
+                    self.play_next_audio()
+                    
+                except Exception as e:
+                    logging.error(f"Failed to play audio: {str(e)}", exc_info=True)
+
+        threading.Thread(target=play_sound, daemon=True).start()
 
     def apply_config_updates(self, updates):
         if isinstance(updates, dict):
@@ -387,16 +453,7 @@ class BudEClient(tk.Tk):
         else:
             print(f"Unexpected config update format: {type(updates)}")
 
-    def process_sentences(self):
-        while not self.sentence_queue.empty():
-            sentence = self.sentence_queue.get()
-            response = requests.post("http://localhost:8001/generate_tts", json={"sentence": sentence, "config": self.config})
-            if response.status_code == 200:
-                tts_filename = response.json()["filename"]
-                self.audio_queue.put(tts_filename)
-                self.play_next_audio()
-            else:
-                print(f"Failed to generate TTS for sentence: {response.text}")
+    import tempfile
 
     def measure_latency(self, start_time):
         end_time = time.time()
@@ -404,33 +461,27 @@ class BudEClient(tk.Tk):
         print(f"Latency: {latency}")
         self.status_label.config(text=f"Status: Latency {latency:.2f}s")
 
+
+    def cleanup_tts_files(self):
+        temp_dir = tempfile.gettempdir()
+        logging.info(f"Cleaning up TTS files in directory: {temp_dir}")
+        tts_files = [f for f in os.listdir(temp_dir) if f.endswith(".wav")]
+        for file in tts_files:
+            try:
+                file_path = os.path.join(temp_dir, file)
+                os.remove(file_path)
+                logging.info(f"Cleaned up TTS file: {file_path}")
+            except Exception as e:
+                logging.error(f"Error during cleanup of TTS file {file}: {str(e)}")
+
+        self.after(300000, self.cleanup_tts_files)  # Run every 5 minutes
     def play_next_audio(self):
         if not self.audio_queue.empty():
             audio_file = self.audio_queue.get()
             self.play_audio(audio_file)
 
-    def play_audio(self, audio_file):
-        def play_sound():
-            with self.playback_lock:
-                try:
-                    data, fs = sf.read(audio_file, dtype='float32')
-                    sd.play(data, fs)
-                    sd.wait()
-                    self.play_next_audio()
-                    
-                    response = requests.post("http://localhost:8001/delete_tts_file", 
-                                             json={"filename": audio_file, "config": self.config})
-                    if response.status_code != 200:
-                        print(f"Failed to delete TTS file: {response.text}")
-                    else:
-                        print(f"Successfully deleted TTS file: {audio_file}")
-                except Exception as e:
-                    print(f"Failed to play audio: {e}")
-
-        threading.Thread(target=play_sound, daemon=True).start()
-
     def take_screenshot(self):
-        response = requests.get(f"http://localhost:8001/take_screenshot?client_id={self.client_id}", json=self.config)
+        response = requests.get(f"http://213.173.96.19:8001/take_screenshot?client_id={self.client_id}", json=self.config)
         if response.status_code == 200:
             file_path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG files", "*.png")])
             if file_path:
@@ -448,7 +499,7 @@ class BudEClient(tk.Tk):
             self.open_website(url)
 
     def open_website(self, url):
-        response = requests.post(f"http://localhost:8001/open_website?client_id={self.client_id}&url={url}", json=self.config)
+        response = requests.post(f"http://213.173.96.19:8001/open_website?client_id={self.client_id}&url={url}", json=self.config)
         if response.status_code == 200:
             messagebox.showinfo("Success", f"Opened website: {url}")
         else:
@@ -459,7 +510,7 @@ class BudEClient(tk.Tk):
         if file_path:
             with open(file_path, "rb") as file:
                 files = {"file": (os.path.basename(file_path), file)}
-                response = requests.get(f"http://localhost:8001/send_file?client_id={self.client_id}&file={file_path}", 
+                response = requests.get(f"http://213.173.96.19:8001/send_file?client_id={self.client_id}&file={file_path}", 
                                         files=files, json=self.config)
                 if response.status_code == 200:
                     save_path = filedialog.asksaveasfilename(defaultextension=os.path.splitext(file_path)[1],
@@ -479,7 +530,7 @@ class BudEClient(tk.Tk):
         tts_files = [f for f in os.listdir() if f.startswith("tts_output_") and f.endswith(".wav")]
         for file in tts_files:
             try:
-                response = requests.post("http://localhost:8001/delete_tts_file", 
+                response = requests.post("http://213.173.96.19:8001/delete_tts_file", 
                                          json={"filename": file, "config": self.config})
                 if response.status_code == 200:
                     print(f"Cleaned up TTS file: {file}")
