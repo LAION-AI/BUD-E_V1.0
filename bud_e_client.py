@@ -28,7 +28,6 @@ import logging
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
 def read_systemprompt(file_path):
     try:
         with open(file_path, 'r') as file:
@@ -77,9 +76,14 @@ class BudEClient(tk.Tk):
         self.stream = None
         self.is_recording = False
         self.frames = []
+        self.inConversation = False
+        self.is_playing_tts = False
 
         self.start_button = tk.Button(self, text="Start Conversation", command=self.toggle_recording)
         self.start_button.pack(pady=5)
+
+        self.conversation_mode_button = tk.Button(self, text="Start Conversation Mode", command=self.toggle_conversation_mode)
+        self.conversation_mode_button.pack(pady=5)
 
         self.screenshot_button = tk.Button(self, text="Take Screenshot", command=self.take_screenshot)
         self.screenshot_button.pack(pady=5)
@@ -93,14 +97,8 @@ class BudEClient(tk.Tk):
         self.update_config_button = tk.Button(self, text="Update ClientConfig in Server", command=self.update_client_config)
         self.update_config_button.pack(pady=5)
 
-        self.clear_history_button = tk.Button(self, text="Clear History", command=self.clear_history)
-        self.clear_history_button.pack(pady=5)
-
-        self.load_history_button = tk.Button(self, text="Load History", command=self.load_history)
-        self.load_history_button.pack(pady=5)
-
-        self.save_history_button = tk.Button(self, text="Save History", command=self.save_history)
-        self.save_history_button.pack(pady=5)
+        self.stop_playback_button = tk.Button(self, text="Stop Playback", command=self.stop_playback)
+        self.stop_playback_button.pack(pady=5)
 
         self.load_config_button = tk.Button(self, text="Load Config", command=self.load_config_file)
         self.load_config_button.pack(pady=5)
@@ -116,10 +114,14 @@ class BudEClient(tk.Tk):
 
         self.config_textbox = scrolledtext.ScrolledText(self, wrap=tk.WORD, width=60, height=30)
         self.config_textbox.pack(pady=5, expand=True, fill=tk.BOTH)
+        self.config_textbox.bind("<KeyRelease>", self.on_config_change)
+
+        self.config_status_label = tk.Label(self, text="Config Status: OK")
+        self.config_status_label.pack(pady=5)
 
         self.client_id = None
         self.config = self.load_config()
-        self.conversation_history = self.load_conversation_history()
+        self.conversation_history = self.config.get('Conversation History', [])
         self.connect_to_server()
 
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -131,16 +133,17 @@ class BudEClient(tk.Tk):
         self.playback_lock = threading.Lock()
 
         self.after(300000, self.cleanup_tts_files)
+        self.after(100, self.check_conversation_mode)
 
     def load_config(self):
         try:
-            with open('client_config.json', 'r') as f:
+            with open('config.json', 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
             return self.get_default_config()
 
     def save_config(self):
-        with open('client_config.json', 'w') as f:
+        with open('config.json', 'w') as f:
             json.dump(self.config, f)
 
     def get_default_config(self):
@@ -160,127 +163,29 @@ class BudEClient(tk.Tk):
             'System Prompt': systemprompt
         }
 
-    def load_conversation_history(self):
+    def on_config_change(self, event):
         try:
-            with open('conversation_history.json', 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return []
+            config_text = self.config_textbox.get(1.0, tk.END)
+            new_config = json.loads(config_text)
+            self.config = new_config
+            self.config_status_label.config(text="Config Status: OK", fg="green")
+        except json.JSONDecodeError:
+            self.config_status_label.config(text="Config Status: Invalid JSON", fg="red")
 
-    def save_conversation_history(self):
-        with open('conversation_history.json', 'w') as f:
-            json.dump(self.conversation_history, f)
-
-    def clear_history(self):
-        self.conversation_history = []
-        self.config['Conversation History'] = []
-        self.save_conversation_history()
-        self.update_config_textbox()
-        messagebox.showinfo("History Cleared", "Conversation history has been cleared.")
-
-    def load_history(self):
-        file_path = filedialog.askopenfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
-        if file_path:
-            try:
-                with open(file_path, 'r') as f:
-                    self.conversation_history = json.load(f)
-                self.config['Conversation History'] = self.conversation_history
-                self.update_config_textbox()
-                messagebox.showinfo("History Loaded", f"Conversation history loaded from {file_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load history: {str(e)}")
-
-    def save_history(self):
-        file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
-        if file_path:
-            try:
-                with open(file_path, 'w') as f:
-                    json.dump(self.conversation_history, f)
-                messagebox.showinfo("History Saved", f"Conversation history saved to {file_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to save history: {str(e)}")
-
-    def load_config_file(self):
-        file_path = filedialog.askopenfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
-        if file_path:
-            try:
-                with open(file_path, 'r') as f:
-                    self.config = json.load(f)
-                self.conversation_history = self.config.get('Conversation History', [])
-                self.update_config_textbox()
-                messagebox.showinfo("Config Loaded", f"Configuration loaded from {file_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load config: {str(e)}")
-
-    def save_config_file(self):
-        file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
-        if file_path:
-            try:
-                config_text = self.config_textbox.get(1.0, tk.END)
-                config_data = json.loads(config_text)
-                with open(file_path, 'w') as f:
-                    json.dump(config_data, f, indent=4)
-                self.config = config_data
-                messagebox.showinfo("Config Saved", f"Configuration saved to {file_path}")
-            except json.JSONDecodeError as e:
-                messagebox.showerror("Error", f"Invalid JSON in config textbox: {str(e)}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to save config: {str(e)}")
-
-    def clear_config(self):
-        self.config = self.get_default_config()
-        self.conversation_history = []
-        self.update_config_textbox()
-        messagebox.showinfo("Config Cleared", "Configuration has been reset to default.")
-
-    def update_config_textbox(self):
-        self.config_textbox.delete(1.0, tk.END)
-        self.config['Conversation History'] = self.conversation_history
-        self.config_textbox.insert(tk.END, json.dumps(self.config, indent=4))
-
-    def connect_to_server(self):
-        max_retries = 5
-        retry_delay = 5
-
-        for attempt in range(max_retries):
-            try:
-                response = requests.get("http://213.173.96.19:8001/")
-                if response.status_code == 200:
-                    print("Connected to server successfully")
-                    self.status_label.config(text="Status: Connected to server")
-                    self.client_id = self.request_client_id()
-                    if self.client_id:
-                        self.update_config_textbox()
-                    return
-                else:
-                    print(f"Failed to connect to server (Attempt {attempt + 1}/{max_retries})")
-            except requests.exceptions.RequestException:
-                print(f"Server is not available (Attempt {attempt + 1}/{max_retries})")
-            
-            if attempt < max_retries - 1:
-                print(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-
-        self.status_label.config(text="Status: Failed to connect to server")
-        messagebox.showerror("Connection Error", "Failed to connect to the server. Please check if the server is running and try again.")
-
-    def request_client_id(self):
-        config = {
-            "LLM_Config": self.config['LLM-Config'],
-            "TTS_Config": self.config['TTS-Config'],
-            "Skills": self.config['Skills'],
-            "Conversation_History": self.conversation_history,
-            "Scratchpad": self.config['Scratchpad'],
-            "System_Prompt": self.config['System Prompt']
-        }
-        response = requests.post("http://213.173.96.19:8001/generate_client_id", json=config)
-        if response.status_code == 200:
-            client_id = response.json()["client_id"]
-            print(f"Client ID: {client_id}")
-            return client_id
+    def toggle_conversation_mode(self):
+        self.inConversation = not self.inConversation
+        if self.inConversation:
+            self.conversation_mode_button.config(text="End Conversation Mode")
+            self.update_client_config()
+            self.start_recording()
         else:
-            print(f"Failed to generate client ID. Status code: {response.status_code}, Response: {response.text}")
-            return None
+            self.conversation_mode_button.config(text="Start Conversation Mode")
+            self.stop_recording()
+
+    def check_conversation_mode(self):
+        if self.inConversation and not self.is_recording and self.audio_queue.empty():
+            self.start_recording()
+        self.after(100, self.check_conversation_mode)
 
     def update_client_config(self):
         try:
@@ -289,7 +194,7 @@ class BudEClient(tk.Tk):
             response = requests.post(f"http://213.173.96.19:8001/update_client_config/{self.client_id}", json=config_data)
             if response.status_code == 200:
                 self.config = config_data
-                messagebox.showinfo("Success", "Client configuration updated successfully on the server")
+                #messagebox.showinfo("Success", "Client configuration updated successfully on the server")
             else:
                 messagebox.showerror("Error", f"Failed to update client configuration on the server: {response.text}")
         except json.JSONDecodeError as e:
@@ -299,6 +204,7 @@ class BudEClient(tk.Tk):
 
     def toggle_recording(self):
         if not self.is_recording:
+            self.update_client_config()
             self.start_recording()
         else:
             self.stop_recording()
@@ -332,6 +238,10 @@ class BudEClient(tk.Tk):
         consecutive_confidence = 0
 
         while self.is_recording:
+            if self.is_playing_tts:
+                await asyncio.sleep(0.1)  # Pause processing while TTS is playing
+                continue
+
             data = self.stream.read(512)
             audio_float = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
             tensor = torch.from_numpy(audio_float).unsqueeze(0)
@@ -349,7 +259,8 @@ class BudEClient(tk.Tk):
                         await self.receive_audio_segment(b''.join(speech_buffer))
                         speech_buffer = []
                         silent_count = 0
-                        self.stop_recording()
+                        if not self.inConversation:
+                            self.stop_recording()
             elif confidence >= 0.9:
                 consecutive_confidence += 1
                 if consecutive_confidence >= 2:
@@ -378,7 +289,7 @@ class BudEClient(tk.Tk):
             self.conversation_history = data['updated_conversation_history']
             self.apply_config_updates(data['config_updates'])
             
-            self.save_conversation_history()
+            self.save_config()
             
             # Process the first sentence immediately
             if sentences:
@@ -406,7 +317,7 @@ class BudEClient(tk.Tk):
         if response.status_code == 200:
             logging.info("Received TTS response successfully")
             audio_data = response.content
-            sample_rate = int(response.headers.get("X-Sample-Rate", 24000)) ### STYLETTS2 returns 24khz
+            sample_rate = int(response.headers.get("X-Sample-Rate", 24000))
             channels = int(response.headers.get("X-Channels", 1))
             sample_width = int(response.headers.get("X-Sample-Width", 2))
 
@@ -423,6 +334,7 @@ class BudEClient(tk.Tk):
             with self.playback_lock:
                 try:
                     logging.info("Attempting to play audio")
+                    self.is_playing_tts = True
                     
                     # Read the audio data from the buffer
                     audio_buffer.seek(0)
@@ -438,10 +350,13 @@ class BudEClient(tk.Tk):
                     sd.wait()
                     logging.info("Audio playback completed")
 
+                    self.is_playing_tts = False
                     self.play_next_audio()
                     
                 except Exception as e:
                     logging.error(f"Failed to play audio: {str(e)}", exc_info=True)
+                finally:
+                    self.is_playing_tts = False
 
         threading.Thread(target=play_sound, daemon=True).start()
 
@@ -453,14 +368,16 @@ class BudEClient(tk.Tk):
         else:
             print(f"Unexpected config update format: {type(updates)}")
 
-    import tempfile
+    def update_config_textbox(self):
+        self.config_textbox.delete(1.0, tk.END)
+        self.config['Conversation History'] = self.conversation_history
+        self.config_textbox.insert(tk.END, json.dumps(self.config, indent=4))
 
     def measure_latency(self, start_time):
         end_time = time.time()
         latency = end_time - start_time
         print(f"Latency: {latency}")
         self.status_label.config(text=f"Status: Latency {latency:.2f}s")
-
 
     def cleanup_tts_files(self):
         temp_dir = tempfile.gettempdir()
@@ -475,10 +392,19 @@ class BudEClient(tk.Tk):
                 logging.error(f"Error during cleanup of TTS file {file}: {str(e)}")
 
         self.after(300000, self.cleanup_tts_files)  # Run every 5 minutes
+
     def play_next_audio(self):
         if not self.audio_queue.empty():
             audio_file = self.audio_queue.get()
             self.play_audio(audio_file)
+
+    def stop_playback(self):
+        sd.stop()
+        with self.playback_lock:
+            while not self.audio_queue.empty():
+                self.audio_queue.get()
+        self.is_playing_tts = False
+        logging.info("Playback stopped and audio queue cleared")
 
     def take_screenshot(self):
         response = requests.get(f"http://213.173.96.19:8001/take_screenshot?client_id={self.client_id}", json=self.config)
@@ -526,24 +452,87 @@ class BudEClient(tk.Tk):
         else:
             messagebox.showinfo("Info", "File selection cancelled")
 
-    def cleanup_tts_files(self):
-        tts_files = [f for f in os.listdir() if f.startswith("tts_output_") and f.endswith(".wav")]
-        for file in tts_files:
+    def load_config_file(self):
+        file_path = filedialog.askopenfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if file_path:
             try:
-                response = requests.post("http://213.173.96.19:8001/delete_tts_file", 
-                                         json={"filename": file, "config": self.config})
-                if response.status_code == 200:
-                    print(f"Cleaned up TTS file: {file}")
-                else:
-                    print(f"Failed to clean up TTS file {file}: {response.text}")
+                with open(file_path, 'r') as f:
+                    self.config = json.load(f)
+                self.conversation_history = self.config.get('Conversation History', [])
+                self.update_config_textbox()
+                messagebox.showinfo("Config Loaded", f"Configuration loaded from {file_path}")
             except Exception as e:
-                print(f"Error during cleanup of TTS file {file}: {e}")
+                messagebox.showerror("Error", f"Failed to load config: {str(e)}")
 
-        self.after(300000, self.cleanup_tts_files)  # Run every 5 minutes
+    def save_config_file(self):
+        file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if file_path:
+            try:
+                config_text = self.config_textbox.get(1.0, tk.END)
+                config_data = json.loads(config_text)
+                with open(file_path, 'w') as f:
+                    json.dump(config_data, f, indent=4)
+                self.config = config_data
+                messagebox.showinfo("Config Saved", f"Configuration saved to {file_path}")
+            except json.JSONDecodeError as e:
+                messagebox.showerror("Error", f"Invalid JSON in config textbox: {str(e)}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save config: {str(e)}")
+
+    def clear_config(self):
+        self.config = self.get_default_config()
+        self.conversation_history = []
+        self.update_config_textbox()
+        messagebox.showinfo("Config Cleared", "Configuration has been reset to default.")
+
+    def connect_to_server(self):
+        max_retries = 5
+        retry_delay = 5
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.get("http://213.173.96.19:8001/")
+                if response.status_code == 200:
+                    print("Connected to server successfully")
+                    self.status_label.config(text="Status: Connected to server")
+                    self.client_id = self.request_client_id()
+                    if self.client_id:
+                        self.update_config_textbox()
+                    return
+                else:
+                    print(f"Failed to connect to server (Attempt {attempt + 1}/{max_retries})")
+            except requests.exceptions.RequestException:
+                print(f"Server is not available (Attempt {attempt + 1}/{max_retries})")
+            
+            if attempt < max_retries - 1:
+                print(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+
+        self.status_label.config(text="Status: Failed to connect to server")
+        messagebox.showerror("Connection Error", "Failed to connect to the server. Please check if the server is running and try again.")
+
+    def request_client_id(self):
+        config = {
+            "LLM_Config": self.config['LLM-Config'],
+            "TTS_Config": self.config['TTS-Config'],
+            "Skills": self.config['Skills'],
+            "Conversation_History": self.conversation_history,
+            "Scratchpad": self.config['Scratchpad'],
+            "System_Prompt": self.config['System Prompt']
+        }
+        response = requests.post("http://213.173.96.19:8001/generate_client_id", json=config)
+        if response.status_code == 200:
+            client_id = response.json()["client_id"]
+            print(f"Client ID: {client_id}")
+            return client_id
+        else:
+            print(f"Failed to generate client ID. Status code: {response.status_code}, Response: {response.text}")
+            return None
 
     def on_closing(self):
         if self.is_recording:
             self.stop_recording()
+        self.stop_playback()
         self.p.terminate()
         self.destroy()
 
