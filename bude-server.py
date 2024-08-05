@@ -10,7 +10,7 @@ def install_dependencies():
         'pyaudio',
         'fastapi',
         'uvicorn',
-        'pyautogui',
+    
         'requests',
         'pandas',
         'pydub',
@@ -172,12 +172,19 @@ async def receive_audio(client_id: str = Query(...), file: UploadFile = File(...
     llm_config = client_session.get('LLM-Config', {})
 
     conversation_history.append({"role": "user", "content": user_input})
+    # Construct the conversation history string
+    conversation_history_str = ""
+    for message in conversation_history:
+      if message["role"] == "user":
+        conversation_history_str += f"User: {message['content']}\n"
+      elif message["role"] == "assistant":
+        conversation_history_str += f"BUD-E: {message['content']}\n"
 
     start_time = time.time()
     ai_response = ask_LLM(
         llm_config['model'],
         system_prompt,
-        str(conversation_history)+" - Write BUD-E's reply to the user without chat formarting in brackets and no role, just directly the reply:",
+        conversation_history_str,
         temperature=llm_config['temperature'],
         top_p=llm_config['top_p'],
         max_tokens=llm_config['max_tokens'],
