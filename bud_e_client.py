@@ -149,12 +149,12 @@ class BudEClient(tk.Tk):
     def get_default_config(self):
         return {
             'LLM-Config': {
-                'model': 'phi',
+                'model': 'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',
                 'temperature': 0.7,
                 'top_p': 0.95,
                 'max_tokens': 400,
-                'frequency_penalty': 1.1,
-                'presence_penalty': 1.1
+                'frequency_penalty': 1.05,
+                'presence_penalty': 1.05
             },
             'TTS-Config': {'voice': 'en-us'},
             'Skills': ['edit', 'completion'],
