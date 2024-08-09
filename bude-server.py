@@ -10,7 +10,7 @@ def install_dependencies():
         'pyaudio',
         'fastapi',
         'uvicorn',
-    
+        'pyautogui',
         'requests',
         'pandas',
         'pydub',
@@ -62,6 +62,7 @@ import time
 import nltk
 from nltk.tokenize import sent_tokenize
 from pydantic import BaseModel
+from langdetect import detect, LangDetectException
 
 nltk.download('punkt', quiet=True)
 
@@ -75,6 +76,24 @@ import logging
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
+from langdetect import detect, LangDetectException
+
+def detect_language(text):
+    try:
+        # Detect the language
+        lang = detect(text)
+        return lang
+    except LangDetectException:
+        return "Unknown"
+    except Exception as e:
+        print(f"An error occurred during language detection: {e}")
+        return "Error"
+
+# Example usage
+if __name__ == "__main__":
+    sample_text = "This is a sample English text."
+    detected_lang = detect_language(sample_text)
+    print(f"Detected language: {detected_lang}")
 
 class SentenceRequest(BaseModel):
     sentence: str
@@ -96,7 +115,7 @@ is_running = True
 def generate_client_id():
     return hashlib.sha256(os.urandom(10)).hexdigest()[:10]
 
-def split_text_into_sentences(text):
+def split_text_into_sentences(text):     
     sentences = sent_tokenize(text)
     merged_sentences = []
     current_sentence = ""
@@ -105,7 +124,7 @@ def split_text_into_sentences(text):
         if not merged_sentences:
             # For the first merged sentence
             current_sentence += sentence + " "
-            if len(current_sentence) >= 40 or i == len(sentences) - 1:
+            if len(current_sentence) >= 20 or i == len(sentences) - 1:
                 merged_sentences.append(current_sentence.strip())
                 current_sentence = ""
         else:
@@ -163,6 +182,12 @@ async def receive_audio(client_id: str = Query(...), file: UploadFile = File(...
         end_time = time.time()
         print(f"ASR Time: {end_time - start_time} seconds")
         print(f"User: {user_input}")
+        start_time = time.time()
+
+        language = detect_language(user_input)
+        print(f"Language Detection Time: {end_time - start_time} seconds")
+
+
     finally:
         os.remove(filename)  # Delete the audio file after transcription
 
