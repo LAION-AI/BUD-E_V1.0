@@ -79,7 +79,7 @@ import sys
 from types import ModuleType
 import json
 import re
-
+import base64
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -247,10 +247,10 @@ def import_skills_code(skills_code):
 
 def process_lm_activated_skills(ai_response, client_session, user_input):
     skills_code = client_session.get('Skills', '')
-    print(skills_code)
+    #print(skills_code)
     lm_activated_skills = parse_lm_activated_skills(skills_code)
-    print("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
-    print("lm_activated_skills:", lm_activated_skills)
+    #print("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
+    #print("lm_activated_skills:", lm_activated_skills)
     
     # Import the skills code
     imported_functions = import_skills_code(skills_code)
@@ -408,13 +408,35 @@ async def generate_client_id_endpoint(config: ClientConfig):
     }
     return JSONResponse(content={"client_id": new_client_id}, status_code=200)
 
+
+
+
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.responses import Response
+import json
+import time
+import os
+import logging
+import asyncio
+import io
+import wave
+import pyaudio
+import requests
+import nltk
+from nltk.tokenize import sent_tokenize
+import traceback
+
+# Ensure NLTK punkt tokenizer is downloaded
+nltk.download('punkt', quiet=True)
+
+
 @app.post("/receive_audio")
 async def receive_audio(
     client_id: str = Form(...),
     file: UploadFile = File(...),
     client_config: str = Form(...)
 ):
-    startendpoint= time.time()
+    startendpoint = time.time()
     if client_id not in client_sessions:
         raise HTTPException(status_code=403, detail="Invalid client ID")
 
@@ -428,22 +450,9 @@ async def receive_audio(
         raise HTTPException(status_code=400, detail="Invalid data in client_config")
 
     skills_code = config_dict.get('Skills', '')
-    # Parse language model activated skills
     lm_activated_skills = parse_lm_activated_skills(skills_code)
     logging.info(f"Parsed LM activated skills: {lm_activated_skills}")
 
-    #print("client_sessions[client_id]:", type( client_sessions[client_id]), client_sessions[client_id])
-    #print("LLM_Config:", client_sessions[client_id]["LLM_Config"])
-    #print("LLM_Config [model]:", client_sessions[client_id]["LLM_Config"]["model"])
-
-
-    print("&&&&&&&&&&&&&&&&&&&")
-    print("&&&&&&&&&&&&&&&&&&&")
-    print("&&&&&&&&&&&&&&&&&&&")
-
-    #print("client_session:", client_session)
-
-    # Process the audio file
     filename = f"{client_id}_audio.wav"
     with open(filename, "wb") as audio_file:
         audio_file.write(await file.read())
@@ -461,15 +470,12 @@ async def receive_audio(
         print(f"Language Detected: {language}")
         print(f"Language Detection Time: {end_time - start_time} seconds")
 
-        
-  
         keyword_activated_skills = extract_activated_skills_from_code([skills_code])
 
         server_side_skills = []
         client_side_skills = []
 
         skill_response = ""
-        #print("SKILL-CODE:", skills_code)
         for skill_name, skill_comment in keyword_activated_skills.items():
             conditions_list = parse_list_of_lists(skill_comment)
 
@@ -484,12 +490,12 @@ async def receive_audio(
             skill_response, config_dict = skill_execution(
                 skill_name, user_input, client_sessions[client_id])
 
-        if client_side_skills:
-            skill_response, client_session = await send_skills_to_client(client_id, client_side_skills, client_sessions[client_id])
+        #if client_side_skills:
+        #    skill_response, client_session = await send_skills_to_client(client_id, client_side_skills, client_sessions[client_id])
 
         system_prompt = client_sessions[client_id].get('System_Prompt', '')
         llm_config = client_sessions[client_id].get('LLM_Config', {})
-        print("LLM CONFIG:",llm_config )
+        print("LLM CONFIG:", llm_config)
 
         conversation_history = client_sessions[client_id].get('Conversation_History', [])
         if skill_response != "":
@@ -506,73 +512,142 @@ async def receive_audio(
                 conversation_history_str += f"BUD-E: {message['content']}\n"
 
         start_time = time.time()
-        ai_response = ask_LLM(
-            llm_config['model'],
-            system_prompt,
-            conversation_history_str,
-            temperature=llm_config['temperature'],
-            top_p=llm_config['top_p'],
-            max_tokens=llm_config['max_tokens'],
-            frequency_penalty=llm_config['frequency_penalty'],
-            presence_penalty=llm_config['presence_penalty']
-        )
+        ai_response = ""
+        first_sentence = ""
+        rest_of_text = ""
+        first_sentence_complete = False
+        sentences = []
+        tts_task = None
+
+        streaming = llm_config.get('streaming', True)
+
+        if streaming:
+            for chunk in ask_LLM(
+                llm_config['model'],
+                system_prompt,
+                conversation_history_str,
+                temperature=llm_config['temperature'],
+                top_p=llm_config['top_p'],
+                max_tokens=llm_config['max_tokens'],
+                frequency_penalty=llm_config['frequency_penalty'],
+                presence_penalty=llm_config['presence_penalty'],
+                streaming=True
+            ):
+                if chunk:
+                    ai_response += chunk
+                    if not first_sentence_complete:
+                        first_sentence += chunk
+                        if any(char in first_sentence for char in ['.', '!', '?']):
+                            first_sentence_complete = True
+                            sentences.append(first_sentence)
+                            
+                            # Start TTS generation for the first sentence
+                            tts_config = client_sessions[client_id].get('TTS_Config', {})
+                            voice = tts_config.get('voice', 'Stefanie')
+                            speed = tts_config.get('speed', 'normal')
+                            logger.info(f"Attempting TTS generation with voice: {voice}, speed: {speed}")
+                            tts_task = asyncio.create_task(generate_tts(first_sentence, voice, speed, client_sessions[client_id]))
+                    else:
+                        rest_of_text += chunk
+        else:
+            # Non-streaming mode
+            ai_response = ask_LLM(
+                llm_config['model'],
+                system_prompt,
+                conversation_history_str,
+                temperature=llm_config['temperature'],
+                top_p=llm_config['top_p'],
+                max_tokens=llm_config['max_tokens'],
+                frequency_penalty=llm_config['frequency_penalty'],
+                presence_penalty=llm_config['presence_penalty'],
+                streaming=False
+            )
+            sentences = re.split(r'(?<=[.!?])\s+', ai_response)
+            first_sentence = sentences[0]
+            rest_of_text = ' '.join(sentences[1:])
+
+            # Start TTS generation for the first sentence
+            tts_config = client_sessions[client_id].get('TTS_Config', {})
+            voice = tts_config.get('voice', 'Stefanie')
+            speed = tts_config.get('speed', 'normal')
+            logger.info(f"Attempting TTS generation with voice: {voice}, speed: {speed}")
+            tts_task = asyncio.create_task(generate_tts(first_sentence, voice, speed, client_sessions[client_id]))
+
+        # Handle case where there's no sentence-ending punctuation in streaming mode
+        if streaming and not first_sentence_complete:
+            first_sentence = ai_response.strip()
+            sentences = [first_sentence]
+            rest_of_text = ""
+
+            # Start TTS generation for the first sentence if not already started
+            if not tts_task:
+                tts_config = client_sessions[client_id].get('TTS_Config', {})
+                voice = tts_config.get('voice', 'Stefanie')
+                speed = tts_config.get('speed', 'normal')
+                logger.info(f"Attempting TTS generation with voice: {voice}, speed: {speed}")
+                tts_task = asyncio.create_task(generate_tts(first_sentence, voice, speed, client_sessions[client_id]))
+
         end_time = time.time()
         print(f"LLM Time: {end_time - start_time} seconds")
         print(f"AI: {ai_response}")
 
-        # Process language model activated skills
-        ai_response, updated_config_dict = process_lm_activated_skills(ai_response, client_sessions[client_id] , user_input)
+        # Process LM activated skills on the full AI response
+        ai_response, updated_config_dict = process_lm_activated_skills(ai_response, client_sessions[client_id], user_input)
+
+        # Split the rest of the text into sentences and add to the sentences list
+        if rest_of_text:
+            sentences.extend(sent_tokenize(rest_of_text.strip()))
 
         conversation_history.append({"role": "assistant", "content": ai_response})
 
         client_sessions[client_id] = updated_config_dict
 
-        sentences = split_text_into_sentences(ai_response)
-
-        tts_config = client_sessions[client_id].get('TTS_Config', {})
-
-        voice = tts_config.get('voice', 'Stefanie')
-        speed = tts_config.get('speed', 'normal')
-
-        print("TTS CONFIG:",tts_config ) 
-        print(voice, speed) 
-        first_sentence_audio = None
-        if sentences:
-            first_sentence_audio = await generate_tts(sentences[0], voice, speed,  client_sessions[client_id])
-
-
-            # Analyze first_sentence_audio
-            print("Type of first_sentence_audio:", type(first_sentence_audio))
-    
-            if isinstance(first_sentence_audio, str):
-                print("first_sentence_audio is a string. Content:", first_sentence_audio[:100])  # Print first 100 chars
-            elif isinstance(first_sentence_audio, bytes):
-                print("first_sentence_audio is bytes. Length:", len(first_sentence_audio))
-                # Try to detect audio format
-                if first_sentence_audio.startswith(b'RIFF'):
-                  print("Appears to be a WAV file")
-                elif first_sentence_audio.startswith(b'\xFF\xFB') or first_sentence_audio.startswith(b'ID3'):
-                  print("Appears to be an MP3 file")
-                else:
-                  print("Unknown audio format")
-            elif first_sentence_audio is None:
-                print("first_sentence_audio is None")
-            else:
-               print("first_sentence_audio is an unexpected type")
-
+        # Prepare the response data
         response_data = {
-            "first_sentence_audio": first_sentence_audio,
-            "sentences": sentences,
+            "sentences": sentences[1:],
             "updated_conversation_history": conversation_history,
-            "config_updates":  client_sessions[client_id]
+            "config_updates": client_sessions[client_id]
         }
-        print("TIME FULL ENDPOINT SCRIPT:" , time.time()-startendpoint)
 
-        return JSONResponse(content=response_data, status_code=200)
+        # Convert JSON data to bytes and add a separator
+        json_bytes = json.dumps(response_data).encode('utf-8')
+        separator = b'\n---AUDIO_DATA---\n'
+
+        # Wait for the TTS task to complete
+        tts_filename = await tts_task if tts_task else None
+
+        if tts_filename is None:
+            logger.error("TTS generation failed for the first sentence")
+            # Instead of raising an exception, we'll return an error message in the response
+            error_message = "TTS generation failed for the first sentence. Proceeding with text-only response."
+            logger.warning(error_message)
+            
+            # Add error message to the response data
+            response_data["error"] = error_message
+
+            # Return JSON response without audio data
+            return Response(content=json.dumps(response_data).encode('utf-8'), media_type="application/json")
+
+        # Read the audio file
+        with open(tts_filename, 'rb') as audio_file:
+            first_sentence_audio = audio_file.read()
+
+        # Combine JSON data and audio data
+        combined_data = json_bytes + separator + first_sentence_audio
+
+        print("TIME FULL ENDPOINT SCRIPT:", time.time() - startendpoint)
+
+        # Clean up the temporary audio file
+        os.remove(tts_filename)
+
+        return Response(content=combined_data, media_type="application/octet-stream")
 
     except Exception as e:
-        print(f"An error occurred: {str(e)}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        logger.error(f"An error occurred: {str(e)}")
+        logger.error(traceback.format_exc())
+        return Response(content=json.dumps({"error": str(e)}).encode('utf-8'), 
+                        status_code=500, 
+                        media_type="application/json")
 
     finally:
         if os.path.exists(filename):
@@ -583,9 +658,10 @@ async def generate_tts(sentence: str, voice: str, speed: str, client_session: di
     
     tts_config = client_session.get('TTS-Config', {})
     base_url = tts_config.get('TTS_SERVER_URL', 'http://213.173.96.19')
-
+    print("DEBUG:",sentence, voice, speed, base_url)
     tts_output = text_to_speech(sentence, voice, speed, base_url)
     if tts_output is None:
+        
         logging.error(f"TTS generation failed for sentence: {sentence}")
         return None
     
@@ -777,6 +853,7 @@ def run_server():
     uvicorn.run(app, host="0.0.0.0", port=8001)
 
 if __name__ == "__main__":
+
     # Start the FastAPI server in a separate thread
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
