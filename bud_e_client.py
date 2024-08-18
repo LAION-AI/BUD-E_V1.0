@@ -16,7 +16,7 @@ import sys
 import mimetypes
 import torch
 import numpy as np
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import Response
 import uvicorn
 import json
@@ -30,7 +30,7 @@ import pvporcupine
 import struct
 import numpy as np
 
-PORCUPINE_API_KEY= "FZg4dv9mLgfj9VkDoLWU8xjyl5dT9bEWVzU1AItDkh3v+46Xbd+GLA==" 
+PORCUPINE_API_KEY= "X+OQINdgT65zWo/BpnunBPRef3uMEWRmES2DjGzwYW/oKQY6kyL9Kw==" 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -201,15 +201,29 @@ class BudEClient(tk.Tk):
 
         self.setup_porcupine()
         self.start_wake_word_detection()
+        self.stop_word_detected = threading.Event()
+
+        self.last_wake_word_time = 0
+        self.wake_word_cooldown = 1  # 1 seconds cooldown
+
+    def start_wake_word_detection(self):
+        self.wake_word_thread = threading.Thread(target=self.wake_word_detection_loop, daemon=True)
+        self.wake_word_thread.start()
+
 
     def setup_porcupine(self):
         if self.os_type == "Windows":
-            keyword_path = "hey-buddy_en_windows_v3_0_0.ppn"
+            hey_buddy_path = "hey-buddy_en_windows_v3_0_0.ppn"
+            stop_buddy_path = "stop-buddy_en_windows_v3_0_0.ppn"
         else:
-            keyword_path = "hey-buddy_en_linux_v3_0_0.ppn"
+            hey_buddy_path = "hey-buddy_en_linux_v3_0_0.ppn"
+            stop_buddy_path = "stop-buddy_en_linux_v3_0_0.ppn"
         
-        self.porcupine = pvporcupine.create(PORCUPINE_API_KEY, keyword_paths=[keyword_path], sensitivities=[0.5])
-
+        self.porcupine = pvporcupine.create(
+            PORCUPINE_API_KEY, 
+            keyword_paths=[hey_buddy_path, stop_buddy_path], 
+            sensitivities=[0.5, 0.5]
+        )
     def start_wake_word_detection(self):
         self.wake_word_thread = threading.Thread(target=self.wake_word_detection_loop, daemon=True)
         self.wake_word_thread.start()
@@ -230,9 +244,57 @@ class BudEClient(tk.Tk):
                 pcm = struct.unpack_from("h" * self.porcupine.frame_length, pcm)
 
                 keyword_index = self.porcupine.process(pcm)
-                if keyword_index >= 0:
-                    print("Wake word 'Hey Buddy' detected!")
-                    self.after(0, self.start_conversation_mode)
+                current_time = time.time()
+
+                if keyword_index == 0:  # "Hey Buddy" detected
+                    if current_time - self.last_wake_word_time > self.wake_word_cooldown:
+                        print("Wake word 'Hey Buddy' detected!")
+                        self.last_wake_word_time = current_time
+                        # Use after to call toggle_conversation_mode from the main thread
+                        self.after(0, self.activate_conversation_mode)
+                        # Pause this thread briefly to allow conversation mode to start
+                        time.sleep(0.5)
+                elif keyword_index == 1:  # "Stop Buddy" detected
+                    print("Stop word 'Stop Buddy' detected!")
+                    self.after(0, self.deactivate_conversation_mode)
+
+        except Exception as e:
+            print(f"Error in wake word detection loop: {e}")
+        finally:
+            audio_stream.close()
+            pa.terminate()
+
+    def activate_conversation_mode(self):
+        if not self.inConversation:
+            print("Activating conversation mode via wake word")
+            self.toggle_conversation_mode()
+
+    def deactivate_conversation_mode(self):
+        if self.inConversation:
+            print("Deactivating conversation mode via stop word")
+            self.toggle_conversation_mode()
+        self.stop_playback()
+        
+
+    def stop_word_detection_loop(self):
+        pa = pyaudio.PyAudio()
+        audio_stream = pa.open(
+            rate=self.porcupine.sample_rate,
+            channels=1,
+            format=pyaudio.paInt16,
+            input=True,
+            frames_per_buffer=self.porcupine.frame_length
+        )
+
+        try:
+            while True:
+                pcm = audio_stream.read(self.porcupine.frame_length)
+                pcm = struct.unpack_from("h" * self.porcupine.frame_length, pcm)
+
+                keyword_index = self.porcupine.process(pcm)
+                if keyword_index == 1:  # "Stop Buddy" detected
+                    print("Stop word 'Stop Buddy' detected!")
+                    self.after(0, self.stop_conversation_and_playback)
         finally:
             audio_stream.close()
             pa.terminate()
@@ -240,19 +302,37 @@ class BudEClient(tk.Tk):
     def start_conversation_mode(self):
         if not self.inConversation:
             print("Starting conversation mode")
-            self.toggle_conversation_mode()
-
-    def toggle_conversation_mode(self):
-        self.inConversation = not self.inConversation
-        if self.inConversation:
+            self.inConversation = True
             self.conversation_mode_button.config(text="End Conversation Mode")
             self.update_client_config()
             self.start_recording()
         else:
+            print("Already in conversation mode")
+
+    def stop_conversation_and_playback(self):
+        if self.inConversation:
+            print("Stopping conversation mode")
+            self.inConversation = False
             self.conversation_mode_button.config(text="Start Conversation Mode")
             self.stop_recording()
+        self.stop_playback()
+        print("Playback stopped")
 
 
+
+
+    def toggle_conversation_mode(self):
+        self.inConversation = not self.inConversation
+        if self.inConversation:
+            print("Entering conversation mode")
+            self.conversation_mode_button.config(text="End Conversation Mode")
+            self.update_client_config()
+            self.start_recording()
+        else:
+            print("Exiting conversation mode")
+            self.conversation_mode_button.config(text="Start Conversation Mode")
+            self.stop_recording()
+        print(f"Conversation mode is now {'active' if self.inConversation else 'inactive'}")
 
 
     def clear_config(self):
@@ -439,7 +519,6 @@ class BudEClient(tk.Tk):
             self.start_button.config(text="Start Conversation")
             self.status_label.config(text="Status: Stopped")
 
-
     async def process_audio(self):
         recording = False
         silent_count = 0
@@ -448,6 +527,11 @@ class BudEClient(tk.Tk):
         waiting_for_speech = True
 
         while self.is_recording:
+            if self.stop_word_detected.is_set():
+                print("Stop word detected, exiting audio processing")
+                self.stop_word_detected.clear()
+                return  # Exit the function immediately
+
             if self.is_playing_tts:
                 await asyncio.sleep(0.05)  # Pause processing while TTS is playing
                 continue
@@ -464,21 +548,6 @@ class BudEClient(tk.Tk):
             with torch.no_grad():
                 confidence = self.model(tensor, 16000).item()
             print(f"Confidence: {confidence}, Recording: {recording}, Waiting for speech: {waiting_for_speech}")
-
-
-            # Wake word detection
-            pcm = struct.unpack_from("h" * self.porcupine.frame_length, data)
-            keyword_index = self.porcupine.process(pcm)
-            if keyword_index >= 0 and not self.inConversation:
-                print("Wake word detected! Starting conversation mode.")
-                self.toggle_conversation_mode()
-                waiting_for_speech = False
-                recording = True
-                speech_buffer = [data]
-                silent_count = 0
-                continue
-
-
 
             if waiting_for_speech:
                 if confidence >= 0.9:
@@ -501,7 +570,8 @@ class BudEClient(tk.Tk):
                     if silent_count >= 25:
                         print("Silence detected, processing speech")
                         self.playback_complete.clear()  # Reset the event before processing
-                        await self.send_audio_segment_to_server(b''.join(speech_buffer))
+                        if not self.stop_word_detected.is_set():
+                            await self.send_audio_segment_to_server(b''.join(speech_buffer))
                         speech_buffer = []
                         silent_count = 0
                         recording = False
@@ -510,7 +580,11 @@ class BudEClient(tk.Tk):
                         if not self.inConversation:
                             self.stop_recording()
 
-
+            # Check for stop word again at the end of the loop
+            if self.stop_word_detected.is_set():
+                print("Stop word detected, exiting audio processing")
+                self.stop_word_detected.clear()
+                return
     async def send_audio_segment_to_server(self, audio_data):
         start_time = time.time()
         filename = 'temp_speech.wav'
@@ -520,35 +594,113 @@ class BudEClient(tk.Tk):
             wf.setframerate(16000)
             wf.writeframes(audio_data)
 
-        with open(filename, 'rb') as audio_file:
-            files = {"file": (filename, audio_file, "audio/wav")}
-            
-            form_data = {
-                "client_id": self.client_id,
-                "client_config": json.dumps(self.config)
-            }
-            
-            response = requests.post(
-                "http://213.173.96.19:8001/receive_audio",
-                files=files,
-                data=form_data
-            )
+        try:
+            with open(filename, 'rb') as audio_file:
+                files = {"file": (filename, audio_file, "audio/wav")}
+                
+                form_data = {
+                    "client_id": self.client_id,
+                    "client_config": json.dumps(self.config)
+                }
+                
+                response = requests.post(
+                    "http://213.173.96.19:8001/receive_audio",
+                    files=files,
+                    data=form_data
+                )
 
-        if response.status_code == 200:
-            data = response.json()
-            
-            sentences = data['sentences']
-            self.conversation_history = data['updated_conversation_history']
-            self.apply_config_updates(data['config_updates'])
-            
-            self.save_config()
-            
-            # Queue all sentences
-            for sentence in sentences:
-                self.sentence_queue.put(sentence)
+            if response.status_code == 200:
+                # Split the response into JSON and audio parts
+                parts = response.content.split(b'\n---AUDIO_DATA---\n')
+                if len(parts) != 2:
+                    raise ValueError("Invalid response format")
+                
+                json_data, audio_data = parts
+                
+                # Parse JSON data
+                data = json.loads(json_data.decode('utf-8'))
+                
+                sentences = data['sentences']
+                self.conversation_history = data['updated_conversation_history']
+                self.apply_config_updates(data['config_updates'])
+                
+                self.save_config()
+                
+                # Play the first sentence audio
+                first_sentence_audio = io.BytesIO(audio_data)
+                self.play_audio(first_sentence_audio)
+                
+                # Queue remaining sentences
+                for sentence in sentences:
+                    self.sentence_queue.put(sentence)
 
-            threading.Thread(target=self.process_sentences, daemon=True).start()
-            self.measure_latency(start_time)
+                threading.Thread(target=self.process_sentences, daemon=True).start()
+                self.measure_latency(start_time)
+            else:
+                logging.error(f"Server returned status code {response.status_code}")
+                logging.error(f"Response content: {response.text}")
+                raise Exception(f"Server returned status code {response.status_code}")
+
+        except Exception as e:
+            logging.error(f"An error occurred in send_audio_segment_to_server: {str(e)}")
+            # You might want to add some error handling here, such as showing an error message to the user
+        finally:
+            if os.path.exists(filename):
+                os.remove(filename)
+
+
+
+    def process_sentences(self):
+        while not self.sentence_queue.empty():
+            sentence = self.sentence_queue.get()
+            self.process_sentence(sentence)
+        
+        # Signal that all sentences have been processed and played
+        self.playback_complete.set()
+
+    def play_audio(self, audio_buffer):
+        def play_sound():
+            with self.playback_lock:
+                try:
+                    logging.info("Attempting to play audio")
+                    self.is_playing_tts = True
+                    
+                    audio_buffer.seek(0)
+                    with wave.open(audio_buffer, 'rb') as wf:
+                        p = pyaudio.PyAudio()
+                        stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+                                        channels=wf.getnchannels(),
+                                        rate=wf.getframerate(),
+                                        output=True)
+                        
+                        chunk_size = 1024
+                        data = wf.readframes(chunk_size)
+                        
+                        while data:
+                            stream.write(data)
+                            data = wf.readframes(chunk_size)
+                        
+                        stream.stop_stream()
+                        stream.close()
+                        p.terminate()
+
+                    logging.info("Audio playback completed")
+                    self.is_playing_tts = False
+                    self.play_next_audio()
+                    
+                except Exception as e:
+                    logging.error(f"Failed to play audio: {str(e)}", exc_info=True)
+                finally:
+                    self.is_playing_tts = False
+
+        threading.Thread(target=play_sound, daemon=True).start()
+
+    def play_next_audio(self):
+        if not self.audio_queue.empty():
+            next_audio = self.audio_queue.get()
+            self.play_audio(next_audio)
+        elif self.sentence_queue.empty():
+            self.playback_complete.set()
 
     def process_sentences(self):
         while not self.sentence_queue.empty():
@@ -576,62 +728,12 @@ class BudEClient(tk.Tk):
         
         if response.status_code == 200:
             logging.info("Received TTS response successfully")
-            audio_data = response.content
-            sample_rate = int(response.headers.get("X-Sample-Rate", 24000))
-            channels = int(response.headers.get("X-Channels", 1))
-            sample_width = int(response.headers.get("X-Sample-Width", 2))
-
-            audio_buffer = io.BytesIO(audio_data)
-            self.play_audio(audio_buffer, sample_rate, channels, sample_width)
+            audio_data = io.BytesIO(response.content)
+            self.audio_queue.put(audio_data)
+            if not self.is_playing_tts:
+                self.play_next_audio()
         else:
             logging.error(f"Failed to generate TTS for sentence: {response.text}")
-
-    def play_audio(self, audio_buffer, sample_rate, channels, sample_width):
-        def play_sound():
-            with self.playback_lock:
-                try:
-                    logging.info("Attempting to play audio")
-                    self.is_playing_tts = True
-                    
-                    audio_buffer.seek(0)
-                    with wave.open(audio_buffer, 'rb') as wf:
-                        actual_channels = wf.getnchannels()
-                        actual_sample_width = wf.getsampwidth()
-                        actual_sample_rate = wf.getframerate()
-                        n_frames = wf.getnframes()
-                        frames = wf.readframes(n_frames)
-
-                    dtype_map = {1: np.int8, 2: np.int16, 4: np.int32}
-                    audio_data = np.frombuffer(frames, dtype=dtype_map.get(actual_sample_width, np.int16))
-                    
-                    if actual_channels == 2:
-                        audio_data = audio_data.reshape(-1, 2)
-
-                    audio_data = audio_data.astype(np.float32) / (2**(8 * actual_sample_width - 1))
-
-                    logging.info(f"Playing audio with sample rate: {actual_sample_rate}, channels: {actual_channels}")
-
-                    sd.play(audio_data, actual_sample_rate)
-                    sd.wait()
-                    logging.info("Audio playback completed")
-
-                    self.is_playing_tts = False
-                    self.play_next_audio()
-                    
-                except Exception as e:
-                    logging.error(f"Failed to play audio: {str(e)}", exc_info=True)
-                finally:
-                    self.is_playing_tts = False
-
-        threading.Thread(target=play_sound, daemon=True).start()
-
-    def play_next_audio(self):
-        if not self.audio_queue.empty():
-            audio_file = self.audio_queue.get()
-            self.play_audio(audio_file)
-        elif self.sentence_queue.empty():
-            # If both queues are empty, signal that playback is complete
-            self.playback_complete.set()
 
     def apply_config_updates(self, updates):
         if isinstance(updates, dict):
@@ -791,15 +893,16 @@ class BudEClient(tk.Tk):
             print(f"Failed to generate client ID. Status code: {response.status_code}, Response: {response.text}")
             return None
 
-
     def on_closing(self):
         if self.is_recording:
             self.stop_recording()
         self.stop_playback()
         self.p.terminate()
         self.porcupine.delete()
+        # Signal the threads to stop
+        self.wake_word_thread.join(timeout=1)
+        self.stop_word_thread.join(timeout=1)
         self.destroy()
-
 
 if __name__ == "__main__":
     server_thread = threading.Thread(target=run_server, daemon=True)
@@ -807,3 +910,4 @@ if __name__ == "__main__":
 
     app = BudEClient()
     app.mainloop()
+
