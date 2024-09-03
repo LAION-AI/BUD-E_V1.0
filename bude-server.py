@@ -1,46 +1,3 @@
-
-'''
-
-import subprocess
-import sys
-
-def install_dependencies():
-    dependencies = [
-        'asyncio',
-        'pyaudio',
-        'fastapi',
-        'uvicorn',
-        'pyautogui',
-        'requests',
-        'pandas',
-        'pydub',
-        'nltk',
-        'pydantic',
-        'websockets',  # For WebSocket support in FastAPI
-    ]
-
-    print("Installing dependencies...")
-
-    for dep in dependencies:
-        print(f"Installing {dep}...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", dep])
-            print(f"{dep} installed successfully.")<
-        except subprocess.CalledProcessError:
-            print(f"Failed to install {dep}. Please install it manually.")
-
-    # Additional setup for NLTK
-    print("Downloading NLTK punkt tokenizer...")
-    import nltk
-    nltk.download('punkt')
-
-    print("\nAll dependencies have been installed.")
-    print("Note: Some packages like 'pyaudio' might require additional system-level dependencies.")
-    print("If you encounter any issues, please refer to the documentation of the respective packages.")
-
-if __name__ == "__main__":
-    install_dependencies()
-'''
 import asyncio
 import pyaudio
 import wave
@@ -74,12 +31,69 @@ from bud_e_llm import ask_LLM
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import logging
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.responses import Response
+from fastapi import FastAPI, WebSocket, HTTPException
+from fastapi.websockets import WebSocketDisconnect
+import json
+import time
+import os
+import logging
+import asyncio
+import io
+import wave
+import pyaudio
+import requests
+import nltk
+from nltk.tokenize import sent_tokenize
+import traceback
+
+# Ensure NLTK punkt tokenizer is downloaded
+nltk.download('punkt', quiet=True)
+nltk.download('punkt_tab', quiet=True)
+
 
 import sys
 from types import ModuleType
 import json
 import re
 import base64
+import pandas as pd
+import asyncio
+import time
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import APIKeyHeader
+from typing import Optional
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+from fastapi import Depends, HTTPException
+from pydantic import BaseModel
+from typing import Dict, Any, List
+from fastapi.responses import JSONResponse
+from bud_e_llm import ask_LLM
+from bud_e_captioning_with_ocr import send_image_for_captioning_and_ocr, analyze_clipboard
+
+
+# Set up global DataFrame
+api_df = pd.DataFrame(columns=['api_key', 'requests_last_hour', 'email'])
+api_df.loc[len(api_df)] = ['12345', 0, 'dummy@example.com']  # Add dummy API key
+api_df['api_key'] = api_df['api_key'].astype(str)
+
+print(api_df)
+# File to save DataFrame
+DF_FILE = 'api_usage.csv'
+
+# Load existing data if file exists
+if os.path.exists(DF_FILE):
+    api_df = pd.read_csv(DF_FILE)
+
+# API key security scheme
+api_key_header = APIKeyHeader(name="X-API-Key")
+
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -88,40 +102,113 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 logger = logging.getLogger(__name__)
 
 
-
-from langdetect import detect, LangDetectException
-
-def detect_language(text):
-    try:
-        # Detect the language
-        lang = detect(text)
-        return lang
-    except LangDetectException:
-        return "Unknown"
-    except Exception as e:
-        print(f"An error occurred during language detection: {e}")
-        return "Error"
-
-
-class SentenceRequest(BaseModel):
-    sentence: str
-    client_id: str
-    voice: str
-    speed: str
-
-class ClientConfig(BaseModel):
-    LLM_Config: dict
-    TTS_Config: dict
-    Skills: str
-    Conversation_History: list
-    Scratchpad: dict
-    System_Prompt: str
-
-
 app = FastAPI()
 
 client_sessions = {}
+ 
 is_running = True
+
+
+
+class ClientConfig(BaseModel):
+    LLM_Config: Dict[str, Any]
+    TTS_Config: Dict[str, Any]
+    Skills: str
+    Conversation_History: List[Dict[str, str]]
+    Scratchpad: Dict[str, Any]
+    System_Prompt: str
+    API_Key: str
+    client_id: Optional[str] = None
+    clipboard: Optional[str] = None  
+    screen: Optional[bytes] = None   
+    code_for_client_execution: Optional[str] = None  
+
+
+async def save_df_periodically():
+    while True:
+        api_df.to_csv(DF_FILE, index=False)
+        print(f"DataFrame saved to {DF_FILE}")
+        await asyncio.sleep(60)  # Save every minute
+
+# Start the periodic saving task
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(save_df_periodically())
+
+
+
+# Update the verify_api_key function
+def verify_api_key(api_key: str = Depends(api_key_header)):
+    logger.debug(f"Verifying API key: {api_key}")
+    
+    # Convert all keys to strings and lowercase for case-insensitive comparison
+    valid_keys = set(api_df['api_key'].astype(str).str.lower())
+    
+    logger.debug(f"Valid keys: {valid_keys}")
+    
+    if api_key.lower() in valid_keys:
+        logger.info(f"API key {api_key} verified successfully")
+        return api_key
+    else:
+        logger.warning(f"Invalid API key: {api_key}")
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+
+
+class AskLLMRequest(BaseModel):
+    client_session: ClientConfig
+    user_input: str
+
+@app.post("/ask_llm")
+async def ask_llm_endpoint(request: AskLLMRequest, api_key: str = Depends(verify_api_key)):
+    client_session = request.client_session.dict()
+    user_input = request.user_input
+
+    if client_session['client_id'] not in client_sessions:
+        raise HTTPException(status_code=403, detail="Invalid client ID")
+
+    try:
+        # Prepare the conversation history
+        conversation_history = client_session['Conversation_History']
+        conversation_history.append({"role": "user", "content": user_input})
+        conversation_history_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in conversation_history])
+
+        # Get LLM configuration
+        llm_config = client_session['LLM_Config']
+
+        # Call the ask_LLM function
+        ai_response = ask_LLM(
+            llm_config['model'],
+            client_session['System_Prompt'],
+            conversation_history_str,
+            temperature=llm_config['temperature'],
+            top_p=llm_config['top_p'],
+            max_tokens=llm_config['max_tokens'],
+            frequency_penalty=llm_config['frequency_penalty'],
+            presence_penalty=llm_config['presence_penalty'],
+            streaming=False
+        )
+
+        # Update the conversation history
+        conversation_history.append({"role": "assistant", "content": ai_response})
+        client_session['Conversation_History'] = conversation_history
+
+        # Update the client_sessions dictionary
+        client_sessions[client_session['client_id']] = client_session
+
+        # Prepare the response
+        response_data = {
+            "ai_response": ai_response,
+            "updated_client_session": client_session
+        }
+
+        return JSONResponse(content=response_data, status_code=200)
+
+    except Exception as e:
+        logger.error(f"An error occurred in ask_llm_endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
 
 def generate_client_id():
     return hashlib.sha256(os.urandom(10)).hexdigest()[:10]
@@ -249,7 +336,7 @@ def process_lm_activated_skills(ai_response, client_session, user_input):
     skills_code = client_session.get('Skills', '')
     #print(skills_code)
     lm_activated_skills = parse_lm_activated_skills(skills_code)
-    #print("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
+    print("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
     #print("lm_activated_skills:", lm_activated_skills)
     
     # Import the skills code
@@ -260,7 +347,7 @@ def process_lm_activated_skills(ai_response, client_session, user_input):
     print("skill_calls:", skill_calls)
     
     updated_config = client_session.copy()
-    
+    skill_response=""
     for skill_call in skill_calls:
         skill_name = skill_call["name"]
         function_name = skill_call["function_name"]
@@ -303,7 +390,7 @@ def process_lm_activated_skills(ai_response, client_session, user_input):
     # Print the updated TTS config for debugging
     print("Updated TTS CONFIG:", updated_config.get('TTS_Config', {}))
     
-    return ai_response, updated_config
+    return skill_response, updated_config
 
 def skill_execution(function_name, transcription_response, client_session, LMGeneratedParameters=""):
     print(f"Executing skill: {function_name}")
@@ -396,63 +483,79 @@ async def root():
     return {"message": "Server is running"}
 
 @app.post("/generate_client_id")
-async def generate_client_id_endpoint(config: ClientConfig):
+async def generate_client_id_endpoint(request: Request, api_key: str = Depends(verify_api_key)):
+    logging.info(f"Received client ID generation request with API key: {api_key}")
+    
+    try:
+        # Parse the raw request body
+        raw_data = await request.json()
+        
+        # Validate the data against the ClientConfig model
+        config = ClientConfig(**raw_data)
+    except ValidationError as e:
+        logging.error(f"Invalid client configuration: {e}")
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logging.error(f"Error processing client configuration: {e}")
+        raise HTTPException(status_code=400, detail="Invalid request data")
+
     new_client_id = generate_client_id()
-    client_sessions[new_client_id] = {
-        'LLM_Config': config.LLM_Config,
-        'TTS_Config': config.TTS_Config,
-        'Skills': config.Skills,
-        'Conversation_History': config.Conversation_History,
-        'Scratchpad': config.Scratchpad,
-        'System_Prompt': config.System_Prompt
-    }
+    logging.info(f"Generated new client ID: {new_client_id}")
+
+    # Create a new dictionary with all fields from config plus the new client_id
+    client_session = config.dict()
+    client_session['client_id'] = new_client_id
+
+    client_sessions[new_client_id] = client_session
+    
     return JSONResponse(content={"client_id": new_client_id}, status_code=200)
 
-
-
-
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import Response
-import json
-import time
-import os
-import logging
-import asyncio
-import io
-import wave
-import pyaudio
-import requests
-import nltk
-from nltk.tokenize import sent_tokenize
-import traceback
-
-# Ensure NLTK punkt tokenizer is downloaded
-nltk.download('punkt', quiet=True)
 
 
 @app.post("/receive_audio")
 async def receive_audio(
     client_id: str = Form(...),
     file: UploadFile = File(...),
-    client_config: str = Form(...)
+    client_config: str = Form(...),
+    api_key: str = Depends(verify_api_key)
 ):
+    logging.info(f"Received audio from client: {client_id}")
+    #logging.debug(f"Client config: {client_config}")
+    logging.debug(f"API Key: {api_key}")
+    #print(client_sessions)
+    
+    """
+    Receive audio file, process it, and return the response.
+    
+    Parameters:
+    - client_id: ID of the client sending the request
+    - file: Audio file to be processed
+    - client_config: Client configuration in JSON format
+    - api_key: API key for authentication (injected by dependency)
+    
+    Returns:
+    - JSON response with processed data and audio
+    """
     startendpoint = time.time()
     if client_id not in client_sessions:
         raise HTTPException(status_code=403, detail="Invalid client ID")
 
     # Parse the client_config JSON string
     try:
-        config_dict = json.loads(client_config)
-        config = ClientConfig(**config_dict)
+        client_session = json.loads(client_config)
+        config = ClientConfig(**client_session)
     except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid JSON in client_config")
+        raise HTTPException(status_code=400, detail="Invalid JSON in client_session")
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid data in client_config")
-
-    skills_code = config_dict.get('Skills', '')
+        raise HTTPException(status_code=400, detail="Invalid data in client_session")
+    print("#############################12345")
+    # ###### skill_result =await execute_skill_on_client(client_session=client_session) # TEST
+    client_sessions[client_id]=client_session
+    client_sessions[client_id]["code_for_client_execution"] = ""
+    skills_code = client_sessions[client_id].get('Skills', '')
     lm_activated_skills = parse_lm_activated_skills(skills_code)
     logging.info(f"Parsed LM activated skills: {lm_activated_skills}")
-
+    
     filename = f"{client_id}_audio.wav"
     with open(filename, "wb") as audio_file:
         audio_file.write(await file.read())
@@ -463,17 +566,19 @@ async def receive_audio(
         end_time = time.time()
         print(f"ASR Time: {end_time - start_time} seconds")
         print(f"User: {user_input}")
+        #updated_transcription =user_input #+ analyze_clipboard(client_session)
+        print("+++++++++++++++++++++")
+        #print(updated_transcription)
 
-        start_time = time.time()
-        language = detect_language(user_input)
-        end_time = time.time()
-        print(f"Language Detected: {language}")
-        print(f"Language Detection Time: {end_time - start_time} seconds")
+        #start_time = time.time()
+        #language = detect_language(user_input)
+        #end_time = time.time()
+        #print(f"Language Detected: {language}")
+        #print(f"Language Detection Time: {end_time - start_time} seconds")
 
         keyword_activated_skills = extract_activated_skills_from_code([skills_code])
 
-        server_side_skills = []
-        client_side_skills = []
+        skills = []
 
         skill_response = ""
         for skill_name, skill_comment in keyword_activated_skills.items():
@@ -481,17 +586,15 @@ async def receive_audio(
 
             if any(all(cond.lower() in user_input.lower() for cond in condition) for condition in conditions_list):
                 print("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
-                if 'client_side_execution' in skill_name.lower():
-                    client_side_skills.append(skill_name)
-                elif 'server_side_execution' in skill_name.lower():
-                    server_side_skills.append(skill_name)
+                skills.append(skill_name)
 
-        for skill_name in server_side_skills:
-            skill_response, config_dict = skill_execution(
+
+        for skill_name in skills:
+            skill_response, client_session = skill_execution(
                 skill_name, user_input, client_sessions[client_id])
-
-        #if client_side_skills:
-        #    skill_response, client_session = await send_skills_to_client(client_id, client_side_skills, client_sessions[client_id])
+            # Update the client_sessions dictionary with the new session data
+            client_sessions[client_session['client_id']] = client_session
+            
 
         system_prompt = client_sessions[client_id].get('System_Prompt', '')
         llm_config = client_sessions[client_id].get('LLM_Config', {})
@@ -499,8 +602,9 @@ async def receive_audio(
 
         conversation_history = client_sessions[client_id].get('Conversation_History', [])
         if skill_response != "":
+            print("SKILL RESPONSE:" ,skill_response)
             conversation_history.append({"role": "user", "content": user_input})
-            conversation_history.append({"role": "BUD-E (generated by skill)", "content": skill_response})
+            conversation_history.append({"role": "assistant", "content": skill_response})
         else:
             conversation_history.append({"role": "user", "content": user_input})
 
@@ -537,8 +641,13 @@ async def receive_audio(
                     ai_response += chunk
                     if not first_sentence_complete:
                         first_sentence += chunk
-                        if any(char in first_sentence for char in ['.', '!', '?']):
+                        if len(first_sentence) >10 and any(char in first_sentence for char in ['. ', '!', '?']):  #### conflicts with urls in skill calls
                             first_sentence_complete = True
+                            if "</" in first_sentence and ">" in first_sentence: 
+                               # Process LM activated skills on the full AI response
+                               first_sentence, client_sessions[client_id] = process_lm_activated_skills(first_sentence, client_sessions[client_id], user_input)
+                               print("STREAMING & FIRST SENTENCE COMPLETE, first_sentence_test:" , first_sentence)
+    
                             sentences.append(first_sentence)
                             
                             # Start TTS generation for the first sentence
@@ -566,6 +675,12 @@ async def receive_audio(
             first_sentence = sentences[0]
             rest_of_text = ' '.join(sentences[1:])
 
+            if "</" in first_sentence and ">" in first_sentence: 
+              # Process LM activated skills on the full AI response
+              first_sentence, client_sessions[client_id] = process_lm_activated_skills(first_sentence, client_sessions[client_id], user_input)
+              print("NON STREAMING & FIRST SENTENCE COMPLETE, first_sentence_test:", first_sentence)
+
+
             # Start TTS generation for the first sentence
             tts_config = client_sessions[client_id].get('TTS_Config', {})
             voice = tts_config.get('voice', 'Stefanie')
@@ -576,6 +691,12 @@ async def receive_audio(
         # Handle case where there's no sentence-ending punctuation in streaming mode
         if streaming and not first_sentence_complete:
             first_sentence = ai_response.strip()
+            if "</" in first_sentence and ">" in first_sentence: 
+              # Process LM activated skills on the full AI response
+              first_sentence, client_sessions[client_id] = process_lm_activated_skills(first_sentence, client_sessions[client_id], user_input)
+              print("STREAMING & FIRST SENTENCE NOT COMPLETE, first_sentence_test:" , first_sentence)
+
+
             sentences = [first_sentence]
             rest_of_text = ""
 
@@ -591,16 +712,13 @@ async def receive_audio(
         print(f"LLM Time: {end_time - start_time} seconds")
         print(f"AI: {ai_response}")
 
-        # Process LM activated skills on the full AI response
-        ai_response, updated_config_dict = process_lm_activated_skills(ai_response, client_sessions[client_id], user_input)
-
         # Split the rest of the text into sentences and add to the sentences list
         if rest_of_text:
             sentences.extend(sent_tokenize(rest_of_text.strip()))
 
+        ai_response = " ".join(sentences)
         conversation_history.append({"role": "assistant", "content": ai_response})
 
-        client_sessions[client_id] = updated_config_dict
 
         # Prepare the response data
         response_data = {
@@ -672,8 +790,24 @@ async def generate_tts(sentence: str, voice: str, speed: str, client_session: di
 
 
 
+class SentenceRequest(BaseModel):
+    sentence: str
+    client_id: str
+    voice: Optional[str] = "Stefanie"
+    speed: Optional[str] = "normal"
+
 @app.post("/generate_tts")
-async def generate_tts_endpoint(request: SentenceRequest):
+async def generate_tts_endpoint(request: SentenceRequest, api_key: str = Depends(verify_api_key)):
+    """
+    Generate text-to-speech audio for a given sentence.
+    
+    Parameters:
+    - request: SentenceRequest object containing sentence, client_id, and optional voice and speed
+    - api_key: API key for authentication (injected by dependency)
+    
+    Returns:
+    - Audio file response
+    """
     client_id = request.client_id
     if client_id not in client_sessions:
         raise HTTPException(status_code=403, detail="Invalid client ID")
@@ -681,7 +815,7 @@ async def generate_tts_endpoint(request: SentenceRequest):
     client_session = client_sessions[client_id]
     
     logger.info(f"Received TTS request for sentence: {request.sentence}")
-    logger.info(f"Initial Voice: {request.voice}, Speed: {request.speed}")
+    logger.info(f"Voice: {request.voice}, Speed: {request.speed}")
     
     tts_filename = await generate_tts(request.sentence, request.voice, request.speed, client_session)
 
@@ -690,8 +824,6 @@ async def generate_tts_endpoint(request: SentenceRequest):
         raise HTTPException(status_code=500, detail="TTS generation failed for all voices")
     
     return FileResponse(tts_filename, media_type="audio/wav", filename=tts_filename)
-
-
 
 class DeleteFileRequest(BaseModel):
     filename: str
@@ -707,52 +839,9 @@ async def delete_tts_file(request: DeleteFileRequest):
     except Exception as e:
         return JSONResponse(content={"message": f"Error deleting file: {str(e)}"}, status_code=500)
 
-@app.get('/take_screenshot')
-async def take_screenshot(client_id: str):
-    if client_id not in client_sessions:
-        raise HTTPException(status_code=403, detail="Invalid client ID")
-
-    start_time = time.time()
-    screenshot = pyautogui.screenshot()
-    img_byte_arr = io.BytesIO()
-    screenshot.save(img_byte_arr, format='PNG')
-    img_byte_arr = img_byte_arr.getvalue()
-    end_time = time.time()
-    print(f"Screenshot Time: {end_time - start_time} seconds")
-    return StreamingResponse(io.BytesIO(img_byte_arr), media_type="image/png", headers={"Content-Disposition": "attachment; filename=screenshot.png"})
-
-@app.post('/open_website')
-async def open_website(client_id: str, url: str):
-    if client_id not in client_sessions:
-        raise HTTPException(status_code=403, detail="Invalid client ID")
-
-    start_time = time.time()
-    webbrowser.open(url)
-    end_time = time.time()
-    print(f"Open Website Time: {end_time - start_time} seconds")
-    return JSONResponse(content={"message": f"Opened website: {url}"}, status_code=200)
-
-@app.get("/send_file")
-async def send_file(client_id: str, file: str):
-    if client_id not in client_sessions:
-        raise HTTPException(status_code=403, detail="Invalid client ID")
-
-    if not os.path.exists(file):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    start_time = time.time()
-    with open(file, 'rb') as f:
-        file_content = f.read()
-    end_time = time.time()
-    print(f"Read File Time: {end_time - start_time} seconds")
-
-    mime_type, _ = mimetypes.guess_type(file)
-    return Response(content=file_content, media_type=mime_type, headers={
-        "Content-Disposition": f'attachment; filename="{os.path.basename(file)}"'
-    })
 
 @app.post("/update_client_config/{client_id}")
-async def update_client_config(client_id: str, config: dict):
+async def update_client_config(client_id: str, config: dict, api_key: str = Depends(verify_api_key)):
     if client_id not in client_sessions:
         raise HTTPException(status_code=403, detail="Invalid client ID")
 
@@ -762,52 +851,17 @@ async def update_client_config(client_id: str, config: dict):
     return JSONResponse(content={"message": "Client configuration updated successfully"}, status_code=200)
 
 @app.get("/get_client_data/{client_id}")
-async def get_client_data_endpoint(client_id: str):
+async def get_client_data_endpoint(client_id: str, api_key: str = Depends(verify_api_key)):
+
     if client_id not in client_sessions:
         raise HTTPException(status_code=404, detail="Client not found")
     return JSONResponse(content=client_sessions[client_id], status_code=200)
 
-def save_and_play_audio(client_id):
-    """Function to save and play the latest audio file for a client."""
-    client_session = client_sessions.get(client_id)
-    if not client_session:
-        print("Invalid client ID")
-        return
-
-    audio_files = client_session.get('audio_files', [])
-    if not audio_files:
-        print("No audio data to save and play.")
-        return
-
-    print("Playing the latest audio file...")
-    latest_audio_file = audio_files[-1]
-
-    p = pyaudio.PyAudio()
-    wf = wave.open(latest_audio_file, 'rb')
-    stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
-                    channels=wf.getnchannels(),
-                    rate=wf.getframerate(),
-                    output=True)
-
-    data = wf.readframes(1024)
-    while data:
-        stream.write(data)
-        data = wf.readframes(1024)
-
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
-
-    print("Audio buffer cleared")
 
 def print_menu():
     """Function to print the server menu."""
-    print("\n1. Save and Play Audio")
-    print("2. Take Screenshot")
-    print("3. Open Website")
-    print("4. Send File")
-    print("5. Exit")
-    print("Enter your choice (1-5): ", end="", flush=True)
+    print("1. Exit")
+    print("Enter your choice (1): ", end="", flush=True)
 
 def run_cli():
     """Function to run the command-line interface."""
@@ -815,34 +869,7 @@ def run_cli():
     while is_running:
         print_menu()
         choice = input()
-
         if choice == "1":
-            client_id = input("Enter client ID: ")
-            save_and_play_audio(client_id)
-        elif choice == "2":
-            client_id = input("Enter client ID: ")
-            screenshot = pyautogui.screenshot()
-            screenshot.save("server_screenshot.png")
-            print("Screenshot saved as server_screenshot.png")
-        elif choice == "3":
-            client_id = input("Enter client ID: ")
-            url = input("Enter the URL to open: ")
-            webbrowser.open(url)
-            print(f"Opened website: {url}")
-        elif choice == "4":
-            client_id = input("Enter client ID: ")
-            file_path = input("Enter the path of the file to send: ")
-            if os.path.exists(file_path):
-                with open(file_path, "rb") as file:
-                    files = {"file": (os.path.basename(file_path), file)}
-                    response = requests.get(f"http://90.186.125.172:8002/send_file?client_id={client_id}&file={file_path}")
-                    if response.status_code == 200:
-                        print(f"File sent successfully: {file_path}")
-                    else:
-                        print(f"Failed to send file: {response.text}")
-            else:
-                print("File not found.")
-        elif choice == "5":
             is_running = False
             break
         else:
@@ -852,11 +879,32 @@ def run_server():
     """Function to run the FastAPI server."""
     uvicorn.run(app, host="0.0.0.0", port=8001)
 
+def cleanup_old_tts_files():
+    while True:
+        current_time = time.time()
+        for filename in os.listdir('.'):
+            if filename.startswith('tts_output') and filename.endswith('.wav'):
+                file_path = os.path.join('.', filename)
+                file_age = current_time - os.path.getmtime(file_path)
+                if file_age > 60:  # 60 seconds = 1 minute
+                    try:
+                        os.remove(file_path)
+                        print(f"Deleted old file: {filename}")
+                    except Exception as e:
+                        print(f"Error deleting {filename}: {e}")
+        time.sleep(60)  # Sleep for 60 seconds before the next cleanup
+
+
 if __name__ == "__main__":
 
     # Start the FastAPI server in a separate thread
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
+
+    # Start the cleanup thread
+    cleanup_thread = threading.Thread(target=cleanup_old_tts_files, daemon=True)
+    cleanup_thread.start()
+
 
     # Run the CLI in the main thread
     run_cli()
