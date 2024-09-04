@@ -775,13 +775,18 @@ class BudEClient(tk.Tk):
                 
                 # execute code in self.config["code_for_client_execution"]
                 print("***************************")
+
+                sentences = data.get('sentences') or [data.get('response')]
+                print("SENTNECES:", sentences)
+                print("[data.get('response')]:", [data.get('response')])
+                print("sentences[0]:", sentences[0]) 
+
                 if self.config["code_for_client_execution"] and len(self.config["code_for_client_execution"])>0:
                     print(self.config["code_for_client_execution"])
 
                     execute_client_code(self.config["code_for_client_execution"])
                     self.config["code_for_client_execution"] = ""
-                sentences = data.get('sentences') or [data.get('response')]
-                
+
                 if sentences and isinstance(sentences[0], str):
                     sentence_audio = SentenceAudio(
                         text=sentences[0],
@@ -789,8 +794,9 @@ class BudEClient(tk.Tk):
                         sample_rate=16000,
                         channels=1
                     )
+                    print(str(SentenceAudio)[:500])
                     self.audio_player.queue_audio(sentence_audio)
-                    for sentence in sentences[0:]:     # if you start with index 1, it skips one
+                    for sentence in sentences[1:]:     
                         if isinstance(sentence, str):
                             self.process_sentence(sentence)
                         else:
