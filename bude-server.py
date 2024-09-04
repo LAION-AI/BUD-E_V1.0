@@ -624,8 +624,9 @@ async def receive_audio(
         tts_task = None
 
         streaming = llm_config.get('streaming', True)
-
+        print("MARK 1")
         if streaming:
+            print("MARK 2")
             for chunk in ask_LLM(
                 llm_config['model'],
                 system_prompt,
@@ -641,25 +642,34 @@ async def receive_audio(
                     ai_response += chunk
                     if not first_sentence_complete:
                         first_sentence += chunk
-                        if len(first_sentence) >10 and any(char in first_sentence for char in ['. ', '!', '?']):  #### conflicts with urls in skill calls
+                        if len(first_sentence) >10 and any(char in first_sentence for char in ['. ', '! ', '? ']):  #### conflicts with urls in skill calls
                             first_sentence_complete = True
+                            print("MARK 3")
                             if "</" in first_sentence and ">" in first_sentence: 
                                # Process LM activated skills on the full AI response
                                first_sentence, client_sessions[client_id] = process_lm_activated_skills(first_sentence, client_sessions[client_id], user_input)
                                print("STREAMING & FIRST SENTENCE COMPLETE, first_sentence_test:" , first_sentence)
     
                             sentences.append(first_sentence)
-                            
+                            print("MARK 4")
                             # Start TTS generation for the first sentence
                             tts_config = client_sessions[client_id].get('TTS_Config', {})
                             voice = tts_config.get('voice', 'Stefanie')
                             speed = tts_config.get('speed', 'normal')
-                            logger.info(f"Attempting TTS generation with voice: {voice}, speed: {speed}")
+                            print(f"Attempting TTS generation with voice: {voice}, speed: {speed} TEXT: {first_sentence}")
                             tts_task = asyncio.create_task(generate_tts(first_sentence, voice, speed, client_sessions[client_id]))
                     else:
                         rest_of_text += chunk
+
+                if "</" in rest_of_text and ">" in rest_of_text: 
+                               # Process LM activated skills on the full AI response
+                               rest_of_text, client_sessions[client_id] = process_lm_activated_skills(first_sentence, client_sessions[client_id], user_input)
+                               print("STREAMING & FIRST SENTENCE COMPLETE, first_sentence_test:" , rest_of_text)
+    
+
         else:
             # Non-streaming mode
+            print("MARK 5")
             ai_response = ask_LLM(
                 llm_config['model'],
                 system_prompt,
@@ -674,7 +684,7 @@ async def receive_audio(
             sentences = re.split(r'(?<=[.!?])\s+', ai_response)
             first_sentence = sentences[0]
             rest_of_text = ' '.join(sentences[1:])
-
+            print("MARK 6")
             if "</" in first_sentence and ">" in first_sentence: 
               # Process LM activated skills on the full AI response
               first_sentence, client_sessions[client_id] = process_lm_activated_skills(first_sentence, client_sessions[client_id], user_input)
@@ -687,9 +697,10 @@ async def receive_audio(
             speed = tts_config.get('speed', 'normal')
             logger.info(f"Attempting TTS generation with voice: {voice}, speed: {speed}")
             tts_task = asyncio.create_task(generate_tts(first_sentence, voice, speed, client_sessions[client_id]))
-
+            print("MARK 7")
         # Handle case where there's no sentence-ending punctuation in streaming mode
         if streaming and not first_sentence_complete:
+            print("MARK 8")
             first_sentence = ai_response.strip()
             if "</" in first_sentence and ">" in first_sentence: 
               # Process LM activated skills on the full AI response
@@ -699,13 +710,15 @@ async def receive_audio(
 
             sentences = [first_sentence]
             rest_of_text = ""
-
+            print("MARK 9")
+            print("sentences:", sentences )
             # Start TTS generation for the first sentence if not already started
             if not tts_task:
+                print("MARK 10")
                 tts_config = client_sessions[client_id].get('TTS_Config', {})
                 voice = tts_config.get('voice', 'Stefanie')
                 speed = tts_config.get('speed', 'normal')
-                logger.info(f"Attempting TTS generation with voice: {voice}, speed: {speed}")
+                print(f"Attempting TTS generation with voice: {voice}, speed: {speed}")
                 tts_task = asyncio.create_task(generate_tts(first_sentence, voice, speed, client_sessions[client_id]))
 
         end_time = time.time()
@@ -722,11 +735,11 @@ async def receive_audio(
 
         # Prepare the response data
         response_data = {
-            "sentences": sentences[1:],
+            "sentences": sentences,
             "updated_conversation_history": conversation_history,
             "config_updates": client_sessions[client_id]
         }
-
+        print("MARK 11")
         # Convert JSON data to bytes and add a separator
         json_bytes = json.dumps(response_data).encode('utf-8')
         separator = b'\n---AUDIO_DATA---\n'
@@ -735,6 +748,7 @@ async def receive_audio(
         tts_filename = await tts_task if tts_task else None
 
         if tts_filename is None:
+            print("MARK 12")
             logger.error("TTS generation failed for the first sentence")
             # Instead of raising an exception, we'll return an error message in the response
             error_message = "TTS generation failed for the first sentence. Proceeding with text-only response."
@@ -754,9 +768,9 @@ async def receive_audio(
         combined_data = json_bytes + separator + first_sentence_audio
 
         print("TIME FULL ENDPOINT SCRIPT:", time.time() - startendpoint)
-
+        print("combined_data:", str(combined_data)[:20000])
         # Clean up the temporary audio file
-        os.remove(tts_filename)
+        #os.remove(tts_filename)
 
         return Response(content=combined_data, media_type="application/octet-stream")
 
@@ -772,7 +786,7 @@ async def receive_audio(
             os.remove(filename)
 
 async def generate_tts(sentence: str, voice: str, speed: str, client_session: dict):
-    logging.info(f"Generating TTS with voice: {voice}, speed: {speed}")
+    logging.info(f"Generating TTS with voice: {voice}, speed: {speed} sentence: {sentence}")
     
     tts_config = client_session.get('TTS-Config', {})
     base_url = tts_config.get('TTS_SERVER_URL', 'http://213.173.96.19')
