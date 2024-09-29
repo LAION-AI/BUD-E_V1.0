@@ -1,0 +1,9 @@
+pyaudio==0.2.13
+wave==0.0.2
+requests==2.31.0
+pandas==2.0.3
+nltk==3.8.1
+pydantic==2.0.3
+fastapi==0.100.0
+uvicorn==0.22.0
+python-multipart==0.0.6

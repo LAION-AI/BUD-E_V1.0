@@ -1,0 +1,29 @@
+# GUI
+tkinter
+
+# Image processing
+Pillow
+
+# Numerical operations
+numpy
+
+# Machine learning
+torch
+
+# HTTP requests
+requests
+
+# Audio processing
+sounddevice
+soundfile
+pyaudio
+wave
+
+# Wake word detection
+pvporcupine
+
+# Clipboard operations
+pyperclip
+
+# Windows-specific clipboard (optional, for Windows only)
+pywin32; platform_system == "Windows"
