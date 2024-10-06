@@ -490,6 +490,19 @@ class BudEClient(tk.Tk):
         self.status_label = tk.Label(self, text="Status: Ready")
         self.status_label.pack(pady=5)
 
+    def update_conversation_history(self, new_history):
+        """
+        Central method to update conversation history across all interfaces.
+        """
+        self.conversation_history = new_history
+        self.config['Conversation_History'] = new_history
+        self.save_config()
+        self.update_config_textbox()
+        
+        # Update the history window if it's open
+        if hasattr(self, 'history_textbox') and self.history_textbox.winfo_exists():
+            self.update_history_textbox()
+
     def position_window(self):
         """
         Positions the main window at the bottom-right corner of the screen.
@@ -571,6 +584,13 @@ class BudEClient(tk.Tk):
         self.select_image_button = tk.Button(window, text="Select Avatar-Image(s)", command=self.select_image)
         self.select_image_button.pack(pady=5)
 
+        # New button: Remove Last Conversation
+        self.remove_last_conversation_button = tk.Button(window, text="Remove Last Conversation", command=self.remove_last_conversation)
+        self.remove_last_conversation_button.pack(pady=5)
+        
+        self.view_history_button = tk.Button(window, text="View Conversation History", command=self.open_conversation_history_window)
+        self.view_history_button.pack(pady=5)
+
         # Animation Interval input
         tk.Label(window, text="Animation Interval (seconds):").pack(pady=5)
         self.animation_interval_entry = tk.Entry(window)
@@ -592,8 +612,114 @@ class BudEClient(tk.Tk):
         self.config_status_label.pack(pady=5)
         self.update_config_textbox()
 
+        # New button: View Conversation History
+        self.view_history_button = tk.Button(window, text="View Conversation History", command=self.open_conversation_history_window)
+        self.view_history_button.pack(pady=5)
+
         # Use after() to schedule the update after the window is fully created
         window.after(100, self.update_config_textbox)
+
+
+    def open_conversation_history_window(self):
+        """
+        Opens a new window with a large text box displaying the conversation history,
+        now including a vertical scrollbar.
+        """
+        history_window = tk.Toplevel(self)
+        history_window.title("Conversation History")
+
+        # Calculate window size (90% of screen dimensions)
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        window_width = int(screen_width * 0.9)
+        window_height = int(screen_height * 0.9)
+
+        # Set window size and position
+        history_window.geometry(f"{window_width}x{window_height}+{int(screen_width*0.05)}+{int(screen_height*0.05)}")
+
+        # Create a frame to hold the text widget and scrollbar
+        text_frame = tk.Frame(history_window)
+        text_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
+
+        # Create text widget
+        self.history_textbox = tk.Text(text_frame, wrap=tk.WORD, font=("TkDefaultFont", 14))
+        self.history_textbox.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+
+        # Create vertical scrollbar
+        scrollbar = tk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.history_textbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Configure the text widget to use the scrollbar
+        self.history_textbox.config(yscrollcommand=scrollbar.set)
+
+        # Create a frame for buttons
+        button_frame = tk.Frame(history_window)
+        button_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Add Save Changes button
+        save_button = tk.Button(button_frame, text="Save Changes", command=self.save_history_changes)
+        save_button.pack(side=tk.LEFT, padx=5)
+
+        # Add Discard Changes button
+        discard_button = tk.Button(button_frame, text="Discard Changes", command=self.update_history_textbox)
+        discard_button.pack(side=tk.LEFT, padx=5)
+
+        # Populate text widget with conversation history
+        self.update_history_textbox()
+        
+
+    def save_history_changes(self):
+        """
+        Saves the changes made in the history textbox.
+        """
+        try:
+            new_history = json.loads(self.history_textbox.get(1.0, tk.END))
+            self.update_conversation_history(new_history)
+            messagebox.showinfo("Success", "Changes saved successfully.")
+        except json.JSONDecodeError:
+            messagebox.showerror("Error", "Invalid JSON format. Please correct the format and try again.")
+
+    def update_history_textbox(self):
+        """
+        Updates the conversation history text box with the current history.
+        """
+        if hasattr(self, 'history_textbox') and self.history_textbox.winfo_exists():
+            self.history_textbox.delete(1.0, tk.END)
+            history_text = json.dumps(self.conversation_history, indent=2)
+            self.history_textbox.insert(tk.END, history_text)
+
+
+    def on_history_change(self, event):
+        """
+        Updates the conversation history when changes are made in the history text box.
+        """
+        try:
+            new_history = json.loads(self.history_textbox.get(1.0, tk.END))
+            self.update_conversation_history(new_history)
+            self.save_config()
+            self.update_config_textbox()
+        except json.JSONDecodeError:
+            # If the JSON is invalid, don't update
+            pass
+
+
+    def remove_last_conversation(self):
+        """
+        Removes the last element from the conversation history,
+        displays a message box, and shows the first 500 characters of the removed element.
+        """
+        if self.conversation_history:
+            removed_conversation = self.conversation_history.pop()
+            self.update_conversation_history(self.conversation_history)
+
+            # Display success message
+            messagebox.showinfo("Success", "Last conversation removed successfully.")
+
+            # Display the first 500 characters of the removed conversation
+            preview = str(removed_conversation)[:500]
+            messagebox.showinfo("Removed Conversation Preview", f"First 500 characters of removed conversation:\n\n{preview}")
+        else:
+            messagebox.showinfo("Info", "No conversation history to remove.")
 
     def update_status(self, message):
         """
@@ -1181,8 +1307,10 @@ class BudEClient(tk.Tk):
             if len(parts) == 2:
                 json_data, audio_data = parts
                 data = json.loads(json_data.decode('utf-8'))
+                new_conversation_history = data.get('updated_conversation_history', self.conversation_history)
+                self.update_conversation_history(new_conversation_history)
 
-                self.conversation_history = data.get('updated_conversation_history', self.conversation_history)
+             
                 config_updates = data.get('config_updates', {})
                 if config_updates:
                     self.config.update(config_updates)
@@ -1207,7 +1335,9 @@ class BudEClient(tk.Tk):
 
                     for sentence in sentences[1:]:
                         if isinstance(sentence, str):
+                            s1=time.time()
                             self.process_sentence(sentence)
+                            print("TTS ENDPOINT LATENCY:", time.time()-s1)
                         else:
                             logging.warning(f"Invalid sentence received: {sentence}")
             else:
@@ -1314,19 +1444,18 @@ class BudEClient(tk.Tk):
     def on_config_change(self, event):
         """
         Event handler for changes in the configuration text box.
-
-        Parameters:
-        - event: The event triggering the handler.
         """
         try:
             config_text = self.config_textbox.get(1.0, tk.END)
             new_config = json.loads(config_text)
             self.config = new_config
+            self.update_conversation_history(new_config.get('Conversation_History', []))
             self.config_status_label.config(text="Config Status: OK", fg="green")
         except json.JSONDecodeError:
             self.config_status_label.config(text="Config Status: Invalid JSON", fg="red")
         except Exception as e:
             self.config_status_label.config(text=f"Config Status: Error - {str(e)}", fg="red")
+
 
     def save_config(self):
         """
