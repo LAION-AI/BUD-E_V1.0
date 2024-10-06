@@ -121,7 +121,7 @@ def process_image(img):
     img_str = base64.b64encode(buffered.getvalue()).decode()  # Encode the image data in base64
 
     timestamp = int(time.time())  # Get the current timestamp
-    img.save(f"test_{timestamp}.jpg", "JPEG", quality=50)  # Optionally save a copy of the image locally with timestamp (for debugging)
+    #img.save(f"test_{timestamp}.jpg", "JPEG", quality=50)  # Optionally save a copy of the image locally with timestamp (for debugging)
 
     return {
         "type": "image",
