@@ -18,80 +18,71 @@ configuration file.
 
 import os
 from dotenv import load_dotenv
-from deepgram import DeepgramClient, SpeakOptions
+#from deepgram import DeepgramClient, SpeakOptions
 import time
 import io
+import requests
 
 # Load environment variables (including the API key)
 load_dotenv()
 
 # DeepGram API key (replace with your actual key or use an environment variable)
-DEEPGRAM_API_KEY = "be5ceed5d8f928ba2c7a0863b11212a29e9b4c24"
+DEEPGRAM_API_KEY = "xxx"
 
-def text_to_speech(text, voice_name="aura-luna-en", speed="medium", base_url=None):  #aura-helios-en    
-
+def text_to_speech(text, voice_name, speed, base_url):
     """
     Convert text to speech using the DeepGram Text-to-Speech API.
-
+    
     Args:
     text (str): The text to be converted to speech
     voice_name (str): Name of the voice model to use (default: "aura-luna-en")
-    speed (str): Speed of the speech (not directly supported by DeepGram, included for compatibility)
-    base_url (str): Not used in this implementation, included for compatibility
-
+    
     Returns:
     bytes: Audio data of the generated speech, or None if an error occurs
     """
+    # Set default voice for "stephanie"
+    if voice_name.lower() == "stefanie":
+        voice_name = "aura-luna-en"
+    if voice_name.lower() == "florian":
+        voice_name = "aura-helios-en"
+
+
     try:
         # Start timing the execution
         start_time = time.time()
-        print("######################################")
-        print(f"Voice model: {voice_name}")
 
-        # Initialize the DeepGram client
-        deepgram = DeepgramClient(api_key=DEEPGRAM_API_KEY)
-
-        # Configure the TTS options
-        speak_options = {
-            "text": text,
-            # Add any additional parameters supported by DeepGram here
+        # Prepare headers and data for the request
+        headers = {
+            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+            "Content-Type": "application/json",
         }
 
-        # Set up the model options
-        model_options = SpeakOptions(
-            model=voice_name,
-            encoding="linear16",
-            container="wav"
-        )
+        data = {
+            "text": text,
+        }
 
-        # Generate the speech
-        response = deepgram.speak.v("1").generate(speak_options, model_options)
+        # Deepgram TTS endpoint with the specified voice model
+        url = f"https://api.deepgram.com/v1/speak?model={voice_name}"
 
-        # Get the audio data
-        audio_data = response.get_audio_data()
+        # Make the request to Deepgram TTS API
+        response = requests.post(url, headers=headers, json=data)
 
-        # Calculate and print the latency
-        latency = time.time() - start_time
-        print(f"Latency: {latency:.2f} seconds")
+        # Check if the request was successful
+        if response.status_code == 200:
+            # Calculate and print the latency
+            latency = time.time() - start_time
+            print(f"Latency: {latency:.2f} seconds")
 
-        return audio_data
+            # Return the audio content (binary data)
+            return response.content
+        else:
+            print(f"Error in text_to_speech: {response.status_code} - {response.text}")
+            return None
 
     except Exception as e:
         print(f"Error in text_to_speech: {e}")
         return None
 
-# Example usage
-if __name__ == "__main__":
-    sample_text = "Hello, this is a test of the DeepGram Text-to-Speech system."
-    audio_data = text_to_speech(sample_text)
-    
-    if audio_data:
-        # Save the audio to a file (for testing purposes)
-        with open("output.wav", "wb") as audio_file:
-            audio_file.write(audio_data)
-        print("Audio file generated successfully.")
-    else:
-        print("Failed to generate audio.")
 
 
 
