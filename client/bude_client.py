@@ -42,7 +42,7 @@ else:
 # logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Constants
-SERVER_IP = "http://213.173.96.19:8001"  # Server IP and port
+SERVER_IP = "http://localhost:8001"  # Server IP and port
 RECORDING_TIME_AFTER_LAST_VOICE_ACTIVITY_DETECTED = 25  # Frames to wait after last voice activity (25 * 32ms frames)
 REQUIRED_VOICE_DETECTION_CONFIDENCE_TO_START_OR_STOP_RECORDING = 0.9  # Threshold for voice activity detection
 
@@ -121,7 +121,7 @@ def process_image(img):
     img_str = base64.b64encode(buffered.getvalue()).decode()  # Encode the image data in base64
 
     timestamp = int(time.time())  # Get the current timestamp
-    #img.save(f"test_{timestamp}.jpg", "JPEG", quality=50)  # Optionally save a copy of the image locally with timestamp (for debugging)
+    img.save(f"test_{timestamp}.jpg", "JPEG", quality=50)  # Optionally save a copy of the image locally with timestamp (for debugging)
 
     return {
         "type": "image",
@@ -922,7 +922,7 @@ class BudEClient(tk.Tk):
                     'presence_penalty': 1.0
                 },
                 'TTS_Config': {
-                    'voice': 'Stefanie',
+                    'voice': 'Florian',
                     'speed': 'normal'
                 },
                 'Skills': self.concatenate_skills("./skills/"),  # Load skills from the 'skills' directory
